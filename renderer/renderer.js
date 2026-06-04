@@ -199,6 +199,7 @@ function updateMergeControls() {
 
   el.mergeBtn.disabled = !has || merging;
   el.sortSelect.disabled = !has || merging;
+  el.shuffleBtn.disabled = !has || merging;
   el.openBtn.disabled = merging;
 }
 
@@ -346,6 +347,18 @@ function applySort(mode) {
   renderAll();
 }
 
+// Randomize the clip order (Fisher–Yates). Result is a "custom" order that can
+// still be hand-tweaked by dragging afterwards. Click again to re-shuffle.
+function shuffleClips() {
+  if (merging || clips.length < 2) return;
+  for (let i = clips.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [clips[i], clips[j]] = [clips[j], clips[i]];
+  }
+  setSortMode('custom');
+  renderAll();
+}
+
 // ---------------------------------------------------------------------------
 // Scanning
 // ---------------------------------------------------------------------------
@@ -484,6 +497,7 @@ function init() {
   el.openBtn = $('openBtn');
   el.openBtn2 = $('openBtn2');
   el.sortSelect = $('sortSelect');
+  el.shuffleBtn = $('shuffleBtn');
   el.folderPath = $('folderPath');
   el.emptyState = $('emptyState');
   el.listContainer = $('listContainer');
@@ -510,6 +524,7 @@ function init() {
   el.openBtn.addEventListener('click', openFolder);
   el.openBtn2.addEventListener('click', openFolder);
   el.sortSelect.addEventListener('change', (e) => applySort(e.target.value));
+  el.shuffleBtn.addEventListener('click', shuffleClips);
   el.mergeBtn.addEventListener('click', startMerge);
   el.cancelBtn.addEventListener('click', () => window.api.cancelMerge());
   el.showBtn.addEventListener('click', () => { if (lastOutput) window.api.showItemInFolder(lastOutput); });

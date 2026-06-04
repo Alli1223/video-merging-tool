@@ -4,6 +4,10 @@ const os = require('os');
 const path = require('path');
 const ffmpegStatic = require('ffmpeg-static');
 const ffprobeStatic = require('ffprobe-static');
+const {
+  parseFps, concatListContent, buildCopyArgs, buildReencodeArgs,
+  parseProgressTime, computePercent
+} = require('./ffargs');
 
 // When the app is packaged into an asar archive the bundled binaries live in
 // the ".unpacked" sibling directory. In dev (running `electron .`) there is no
@@ -44,13 +48,6 @@ function runProbe(file) {
       try { resolve(JSON.parse(out)); } catch (e) { reject(e); }
     });
   });
-}
-
-function parseFps(rate) {
-  if (!rate || rate === '0/0') return 0;
-  const [n, d] = String(rate).split('/').map(Number);
-  if (!d) return n || 0;
-  return n / d;
 }
 
 // Probe one file and reduce ffprobe's output to the fields we care about.
@@ -140,16 +137,6 @@ async function generateThumbnails(items, onThumb) {
 // Merging
 // ---------------------------------------------------------------------------
 
-// Escape a path for an ffmpeg concat-demuxer list file. Forward slashes work on
-// every platform; single quotes are escaped per the concat format rules.
-function concatPath(p) {
-  return p.replace(/\\/g, '/').replace(/'/g, "'\\''");
-}
-
-function isMp4Like(outputPath) {
-  return ['.mp4', '.mov', '.m4v'].includes(path.extname(outputPath).toLowerCase());
-}
-
 function safeUnlink(p) {
   try { fs.unlinkSync(p); } catch (_) { /* ignore */ }
 }
@@ -170,12 +157,9 @@ function runFfmpeg(args, totalDuration, onProgress) {
       const lines = stdoutBuf.split(/\r?\n/);
       stdoutBuf = lines.pop(); // keep the trailing partial line
       for (const line of lines) {
-        const m = line.match(/^out_time=(\d+):(\d+):(\d+(?:\.\d+)?)/);
-        if (m) {
-          const seconds = (+m[1]) * 3600 + (+m[2]) * 60 + parseFloat(m[3]);
-          let percent = totalDuration > 0 ? (seconds / totalDuration) * 100 : 0;
-          percent = Math.max(0, Math.min(99.5, percent));
-          onProgress({ percent, seconds, totalDuration });
+        const seconds = parseProgressTime(line);
+        if (seconds != null) {
+          onProgress({ percent: computePercent(seconds, totalDuration), seconds, totalDuration });
         }
       }
     });
@@ -205,97 +189,19 @@ function runFfmpeg(args, totalDuration, onProgress) {
   });
 }
 
-// Lossless path: stream-copy with the concat demuxer. Requires all clips share
-// the same codecs/parameters (the renderer only chooses this when compatible).
 async function mergeCopy(clips, outputPath, totalDuration, onProgress) {
   const listFile = path.join(os.tmpdir(), `vmt-concat-${process.pid}-${Date.now()}.txt`);
-  const listContent = clips.map((c) => `file '${concatPath(c.path)}'`).join('\n') + '\n';
-  fs.writeFileSync(listFile, listContent, 'utf8');
-
-  const args = ['-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', '-map', '0'];
-  if (isMp4Like(outputPath)) args.push('-movflags', '+faststart');
-  args.push(outputPath);
-
+  fs.writeFileSync(listFile, concatListContent(clips), 'utf8');
   try {
-    await runFfmpeg(args, totalDuration, onProgress);
+    await runFfmpeg(buildCopyArgs(listFile, outputPath), totalDuration, onProgress);
   } finally {
     safeUnlink(listFile);
   }
   return { success: true, mode: 'copy', outputPath };
 }
 
-// Re-encode fallback: normalize every clip to a common resolution, frame rate,
-// pixel format and audio layout, then concatenate with the concat filter. This
-// is the path used when clips are not byte-compatible.
 async function mergeReencode(clips, outputPath, totalDuration, onProgress) {
-  // Target spec = the largest dimensions / highest frame rate among the clips.
-  let W = 0, H = 0, F = 0;
-  for (const c of clips) {
-    if (c.width > W) W = c.width;
-    if (c.height > H) H = c.height;
-    if (c.fps > F) F = c.fps;
-  }
-  W = Math.max(2, W - (W % 2));
-  H = Math.max(2, H - (H % 2));
-  F = F > 0 ? Math.min(Math.round(F), 60) : 30;
-
-  const anyAudio = clips.some((c) => c.hasAudio);
-
-  // Build input args. Clips that lack audio get a matched silent track from an
-  // anullsrc lavfi input so the concat filter sees a uniform stream layout.
-  const inputArgs = [];
-  let inputIndex = 0;
-  const videoInputIdx = [];
-  const audioInputIdx = [];
-
-  clips.forEach((c) => {
-    inputArgs.push('-i', c.path);
-    videoInputIdx.push(inputIndex++);
-  });
-
-  if (anyAudio) {
-    clips.forEach((c, i) => {
-      if (c.hasAudio) {
-        audioInputIdx[i] = videoInputIdx[i];
-      } else {
-        const dur = c.duration > 0 ? c.duration : 1;
-        inputArgs.push('-f', 'lavfi', '-t', String(dur), '-i', 'anullsrc=r=48000:cl=stereo');
-        audioInputIdx[i] = inputIndex++;
-      }
-    });
-  }
-
-  // Build the filter graph.
-  const filters = [];
-  const concatLabels = [];
-  clips.forEach((c, i) => {
-    filters.push(
-      `[${videoInputIdx[i]}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,` +
-      `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${F},format=yuv420p[v${i}]`
-    );
-    if (anyAudio) {
-      filters.push(`[${audioInputIdx[i]}:a]aresample=48000,aformat=channel_layouts=stereo[a${i}]`);
-      concatLabels.push(`[v${i}][a${i}]`);
-    } else {
-      concatLabels.push(`[v${i}]`);
-    }
-  });
-
-  const n = clips.length;
-  const concatFilter = anyAudio
-    ? `${concatLabels.join('')}concat=n=${n}:v=1:a=1[v][a]`
-    : `${concatLabels.join('')}concat=n=${n}:v=1:a=0[v]`;
-  const filterComplex = filters.join(';') + ';' + concatFilter;
-
-  const args = [...inputArgs, '-filter_complex', filterComplex, '-map', '[v]'];
-  if (anyAudio) args.push('-map', '[a]');
-  args.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p');
-  if (anyAudio) args.push('-c:a', 'aac', '-b:a', '192k');
-  else args.push('-an');
-  if (isMp4Like(outputPath)) args.push('-movflags', '+faststart');
-  args.push(outputPath);
-
-  await runFfmpeg(args, totalDuration, onProgress);
+  await runFfmpeg(buildReencodeArgs(clips, outputPath), totalDuration, onProgress);
   return { success: true, mode: 'reencode', outputPath };
 }
 
