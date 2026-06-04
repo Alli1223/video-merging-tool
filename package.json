@@ -17,6 +17,7 @@
     "node": ">=18"
   },
   "dependencies": {
+    "electron-updater": "^6.8.3",
     "ffmpeg-static": "^5.2.0",
     "ffprobe-static": "^3.1.0"
   },
@@ -27,6 +28,11 @@
   "build": {
     "appId": "com.videomergingtool.app",
     "productName": "Video Merging Tool",
+    "publish": {
+      "provider": "github",
+      "owner": "Alli1223",
+      "repo": "video-merging-tool"
+    },
     "files": [
       "main.js",
       "preload.js",

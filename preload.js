@@ -35,5 +35,16 @@ contextBridge.exposeInMainWorld('api', {
   showItemInFolder: (p) => ipcRenderer.invoke('shell:showItem', p),
 
   // Convert an absolute path to a file:// URL (used for the preview player).
-  fileUrl: (p) => ipcRenderer.invoke('util:fileUrl', p)
+  fileUrl: (p) => ipcRenderer.invoke('util:fileUrl', p),
+
+  // Auto-update (from the GitHub releases page).
+  checkForUpdate: () => ipcRenderer.invoke('update:check'),
+  downloadUpdate: () => ipcRenderer.invoke('update:download'),
+  installUpdate: () => ipcRenderer.invoke('update:install'),
+  openReleases: () => ipcRenderer.invoke('update:openReleases'),
+  onUpdateStatus: (cb) => {
+    const handler = (_e, data) => cb(data);
+    ipcRenderer.on('update:status', handler);
+    return () => ipcRenderer.removeListener('update:status', handler);
+  }
 });

@@ -70,6 +70,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: Video Merging Tool ${{ github.ref_name }}
-          files: dist/*.exe
+          # latest.yml + blockmap power electron-updater's in-app auto-update.
+          files: |
+            dist/*.exe
+            dist/latest.yml
+            dist/*.blockmap
           fail_on_unmatched_files: true
           generate_release_notes: true
