@@ -491,3 +491,4 @@ select:disabled { opacity: 0.5; }
   border-radius: 6px;
 }
 .icon-btn:hover { color: var(--text); background: var(--bg-3); }
+.log-path { font-size: 11px; word-break: break-all; }

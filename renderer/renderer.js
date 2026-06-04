@@ -1,5 +1,13 @@
 'use strict';
 
+// Forward uncaught renderer errors to the log file so problems are visible.
+window.addEventListener('error', (e) => {
+  try { window.api.log('error', 'renderer error: ' + ((e.error && e.error.stack) || e.message)); } catch (_) {}
+});
+window.addEventListener('unhandledrejection', (e) => {
+  try { window.api.log('error', 'renderer unhandledrejection: ' + ((e.reason && e.reason.stack) || e.reason)); } catch (_) {}
+});
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -422,6 +430,7 @@ async function scan(dir) {
     el.loadingState.hidden = true;
     el.emptyState.hidden = false;
     setStatus('Could not read that folder: ' + (e.message || e), 'error');
+    window.api.log('error', 'Scan failed (renderer): ' + (e.message || e));
     return;
   }
 
@@ -430,10 +439,16 @@ async function scan(dir) {
 
   if (clips.length === 0) {
     el.emptyState.hidden = false;
-    setStatus('No video files found in that folder.', 'error');
+    const st = result.stats || {};
+    const msg = !st.matched
+      ? 'No video files found in that folder. (Subfolders are not scanned.)'
+      : `Found ${st.matched} file(s), but none had a readable video stream. See Settings → Open log file for details.`;
+    setStatus(msg, 'error');
+    window.api.log('warn', 'Scan produced 0 usable clips: ' + JSON.stringify(st));
     return;
   }
 
+  window.api.log('info', `Loaded ${clips.length} clip(s) from ${dir}`);
   el.listContainer.hidden = false;
   selectedId = null;
   el.previewPane.hidden = true;
@@ -501,6 +516,7 @@ async function startMerge() {
     }
   } catch (e) {
     setStatus('Merge failed: ' + (e.message || e), 'error');
+    window.api.log('error', 'Merge failed (renderer): ' + (e.message || e));
   } finally {
     merging = false;
     el.cancelBtn.hidden = true;
@@ -598,6 +614,9 @@ async function openSettings() {
   } catch (_) {
     el.settingsVersion.textContent = '—';
   }
+  try {
+    el.logPathText.textContent = await window.api.getLogPath();
+  } catch (_) { /* ignore */ }
 }
 
 function closeSettings() {
@@ -687,6 +706,9 @@ function init() {
   el.checkUpdatesBtn = $('checkUpdatesBtn');
   el.updateStatusText = $('updateStatusText');
   el.openReleasesBtn = $('openReleasesBtn');
+  el.openLogBtn = $('openLogBtn');
+  el.openLogFolderBtn = $('openLogFolderBtn');
+  el.logPathText = $('logPathText');
 
   el.openBtn.addEventListener('click', openFolder);
   el.openBtn2.addEventListener('click', openFolder);
@@ -703,6 +725,8 @@ function init() {
   el.settingsOverlay.addEventListener('click', (e) => { if (e.target === el.settingsOverlay) closeSettings(); });
   el.checkUpdatesBtn.addEventListener('click', checkForUpdatesManual);
   el.openReleasesBtn.addEventListener('click', () => window.api.openReleases());
+  el.openLogBtn.addEventListener('click', () => window.api.openLogFile());
+  el.openLogFolderBtn.addEventListener('click', () => window.api.revealLogFile());
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !el.settingsOverlay.hidden) closeSettings(); });
 
   // Thumbnails stream in one by one.

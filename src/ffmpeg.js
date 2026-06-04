@@ -8,6 +8,7 @@ const {
   parseFps, concatListContent, buildCopyArgs, buildReencodeArgs,
   parseProgressTime, computePercent
 } = require('./ffargs');
+const log = require('./logger');
 
 // When the app is packaged into an asar archive the bundled binaries live in
 // the ".unpacked" sibling directory. In dev (running `electron .`) there is no
@@ -28,6 +29,18 @@ let canceled = false;
 function assertBinaries() {
   if (!FFMPEG) throw new Error('FFmpeg binary not found. Run "npm install" to fetch ffmpeg-static.');
   if (!FFPROBE) throw new Error('FFprobe binary not found. Run "npm install" to fetch ffprobe-static.');
+}
+
+// Report resolved binary paths and whether they exist — logged at startup so a
+// packaging / asar-unpack path problem (a common cause of "0 clips found") is
+// immediately visible in the log.
+function binaryInfo() {
+  return {
+    ffmpeg: FFMPEG,
+    ffmpegExists: !!(FFMPEG && fs.existsSync(FFMPEG)),
+    ffprobe: FFPROBE,
+    ffprobeExists: !!(FFPROBE && fs.existsSync(FFPROBE))
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +159,7 @@ function safeUnlink(p) {
 function runFfmpeg(args, totalDuration, onProgress) {
   return new Promise((resolve, reject) => {
     const fullArgs = ['-hide_banner', '-y', '-progress', 'pipe:1', '-nostats', ...args];
+    log.info('Running FFmpeg:', FFMPEG, fullArgs.join(' '));
     const proc = spawn(FFMPEG, fullArgs);
     currentProc = proc;
 
@@ -170,6 +184,7 @@ function runFfmpeg(args, totalDuration, onProgress) {
 
     proc.on('error', (e) => {
       currentProc = null;
+      log.error('Failed to launch FFmpeg:', String((e && e.message) || e));
       reject(e);
     });
 
@@ -184,7 +199,8 @@ function runFfmpeg(args, totalDuration, onProgress) {
         onProgress({ percent: 100, totalDuration });
         return resolve();
       }
-      reject(new Error('FFmpeg exited with code ' + code + '\n' + errTail.trim()));
+      log.error(`FFmpeg exited with code ${code}. stderr tail:\n${errTail.trim()}`);
+      reject(new Error('FFmpeg exited with code ' + code + '\nCommand: ' + fullArgs.join(' ') + '\n' + errTail.trim()));
     });
   });
 }
@@ -237,4 +253,4 @@ function cancel() {
   }
 }
 
-module.exports = { probeFile, generateThumbnails, merge, cancel };
+module.exports = { probeFile, generateThumbnails, merge, cancel, binaryInfo };
