@@ -45,6 +45,7 @@ contextBridge.exposeInMainWorld('api', {
   openLogFile: () => ipcRenderer.invoke('log:open'),
   revealLogFile: () => ipcRenderer.invoke('log:reveal'),
   getLogPath: () => ipcRenderer.invoke('log:path'),
+  copyText: (text) => ipcRenderer.invoke('clipboard:write', text),
 
   // Auto-update (from the GitHub releases page).
   checkForUpdate: () => ipcRenderer.invoke('update:check'),

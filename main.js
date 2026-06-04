@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, screen, clipboard } = require('electron');
 const path = require('path');
 const url = require('url');
 const fs = require('fs');
@@ -257,3 +257,4 @@ ipcMain.handle('log:reveal', async () => {
   return f;
 });
 ipcMain.handle('log:path', () => log.getLogFile());
+ipcMain.handle('clipboard:write', (_e, text) => { clipboard.writeText(String(text == null ? '' : text)); return true; });
