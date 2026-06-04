@@ -280,7 +280,18 @@ async function mergeReencode(clips, outputPath, target, encOpts, totalDuration, 
 // normalized segment, then all segments are joined by stream copy. Falls back
 // to a full re-encode if the stream-copy join fails.
 async function mergeHybrid(clips, outputPath, target, encOpts, codecName, totalDuration, onProgress, forceReencode) {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vmt-seg-'));
+  // Keep the working segments on the SAME drive as the output: this avoids
+  // filling the system drive (C:) with potentially many GB of intermediates,
+  // and makes the final stream-copy join a fast same-volume operation. Fall
+  // back to the system temp dir only if the output folder isn't writable.
+  let tmpDir;
+  try {
+    tmpDir = fs.mkdtempSync(path.join(path.dirname(outputPath), 'vmt-tmp-'));
+  } catch (e) {
+    log.warn('Could not create a temp folder next to the output; using system temp:', String((e && e.message) || e));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vmt-seg-'));
+  }
+  log.info('Hybrid merge working dir:', tmpDir);
   const segments = [];
   try {
     let done = 0;
