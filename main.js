@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, screen } = require('electron');
 const path = require('path');
 const url = require('url');
 const https = require('https');
@@ -19,11 +19,17 @@ let mainWindow = null;
 let lastScanDir = null;
 
 function createWindow() {
+  // Fit the window within the screen's work area so the top bar and footer
+  // (and their buttons) are never pushed off-screen on smaller or scaled
+  // displays — e.g. a 1366x768 laptop can't fully show an 880px-tall window,
+  // which would clip the Shuffle button (top) and Merge button (bottom).
+  const { width: waW, height: waH } = screen.getPrimaryDisplay().workAreaSize;
+
   mainWindow = new BrowserWindow({
-    width: 1320,
-    height: 880,
-    minWidth: 960,
-    minHeight: 640,
+    width: Math.min(1320, waW - 40),
+    height: Math.min(880, waH - 40),
+    minWidth: Math.min(900, waW - 20),
+    minHeight: Math.min(600, waH - 20),
     backgroundColor: '#0f1218',
     title: 'Video Merging Tool',
     webPreferences: {

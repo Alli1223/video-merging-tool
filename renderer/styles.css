@@ -57,7 +57,10 @@ html, body {
   gap: 14px;
   flex: 1;
   justify-content: flex-end;
+  flex-wrap: wrap;
+  row-gap: 8px;
 }
+.topbar-actions > .btn, .topbar-actions .sort-label { flex-shrink: 0; }
 .sort-label {
   display: flex;
   align-items: center;
@@ -390,7 +393,7 @@ select:disabled { opacity: 0.5; }
   cursor: pointer;
 }
 .reencode-toggle input { width: 16px; height: 16px; accent-color: var(--accent); }
-.status-msg { font-size: 13px; flex: 1; }
+.status-msg { font-size: 13px; flex: 1; min-width: 0; }
 .status-msg.error { color: var(--red); }
 .status-msg.success { color: var(--green); }
 
@@ -410,7 +413,7 @@ select:disabled { opacity: 0.5; }
 }
 .progress-text { font-size: 12px; color: var(--muted); min-width: 40px; text-align: right; }
 
-.footer-buttons { display: flex; gap: 10px; }
+.footer-buttons { display: flex; gap: 10px; flex-shrink: 0; }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: #2c3644; border-radius: 6px; }
