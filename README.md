@@ -90,7 +90,8 @@ The pipeline then attaches both `.exe` files to a GitHub Release for that tag.
 2. The app probes every video, reads its metadata and lists the clips oldest
    → newest. A badge shows whether a lossless merge is possible.
 3. Reorder clips by dragging rows in the list or tiles in the timeline. Use the
-   **Order** dropdown to re-sort by date or name, or remove clips with **✕**.
+   **Order** dropdown to re-sort by date or name, hit **🔀 Shuffle** for a random
+   order, or remove clips with **✕**.
 4. Leave **Re-encode** off for a lossless stream-copy (enabled automatically and
    locked on when clips have mixed formats).
 5. Click **Merge ▶**, choose where to save, and watch the progress bar.
