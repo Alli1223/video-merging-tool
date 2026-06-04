@@ -1,0 +1,50 @@
+{
+  "name": "video-merging-tool",
+  "version": "1.0.0",
+  "description": "Scan a folder of videos, order them by capture time, reorder on a drag-and-drop timeline, and merge them into one file. Lossless stream-copy when clips are compatible, automatic re-encode fallback otherwise.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node selftest.js",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ffmpeg-static": "^5.2.0",
+    "ffprobe-static": "^3.1.0"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.videomergingtool.app",
+    "productName": "Video Merging Tool",
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "**/node_modules/ffmpeg-static/**",
+      "**/node_modules/ffprobe-static/**"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "AudioVideo"
+    }
+  }
+}

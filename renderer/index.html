@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; media-src 'self' file:; style-src 'self' 'unsafe-inline';" />
+  <title>Video Merging Tool</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- Top bar -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">🎬</span>
+        <span>Video Merging Tool</span>
+      </div>
+      <div class="topbar-actions">
+        <button id="openBtn" class="btn btn-primary">📁 Open Folder…</button>
+        <label class="sort-label">
+          Order
+          <select id="sortSelect" disabled>
+            <option value="date-asc">Date taken (oldest first)</option>
+            <option value="date-desc">Date taken (newest first)</option>
+            <option value="name-asc">Name (A→Z)</option>
+            <option value="name-desc">Name (Z→A)</option>
+            <option value="custom" hidden>Custom (manual)</option>
+          </select>
+        </label>
+        <span id="folderPath" class="folder-path"></span>
+      </div>
+    </header>
+
+    <!-- Main body: clip list + preview -->
+    <div class="body">
+      <section class="list-pane">
+        <div id="emptyState" class="empty-state">
+          <div class="empty-icon">🎞️</div>
+          <h2>No folder loaded</h2>
+          <p>Choose a folder and the app will scan your videos, read their metadata,<br />and line them up in the order they were recorded.</p>
+          <button id="openBtn2" class="btn btn-primary">📁 Open Folder…</button>
+        </div>
+
+        <div id="listContainer" class="list-container" hidden>
+          <div class="list-toolbar">
+            <span id="clipCount" class="muted"></span>
+            <span class="hint">Drag rows to reorder · ✕ to remove</span>
+          </div>
+          <ul id="clipList" class="clip-list"></ul>
+        </div>
+
+        <div id="loadingState" class="loading-state" hidden>
+          <div class="spinner"></div>
+          <p id="loadingText">Scanning videos…</p>
+        </div>
+      </section>
+
+      <aside class="preview-pane" id="previewPane" hidden>
+        <div class="preview-header">Preview</div>
+        <video id="previewVideo" controls preload="metadata"></video>
+        <div id="previewInfo" class="preview-info"></div>
+      </aside>
+    </div>
+
+    <!-- Timeline -->
+    <section class="timeline-wrap">
+      <div class="timeline-head">
+        <span class="timeline-title">Timeline</span>
+        <span id="totalDuration" class="muted"></span>
+        <span id="compatBadge" class="badge" hidden></span>
+        <span class="spacer"></span>
+        <span class="hint">Drag clips to change the merge order</span>
+      </div>
+      <div id="timeline" class="timeline">
+        <div class="timeline-empty">The timeline will appear here once a folder is loaded.</div>
+      </div>
+    </section>
+
+    <!-- Footer / action bar -->
+    <footer class="footer">
+      <label class="reencode-toggle" title="Re-encode is required when clips have different codecs, resolutions or frame rates.">
+        <input type="checkbox" id="reencodeToggle" disabled />
+        <span id="reencodeLabel">Re-encode (lossless when off)</span>
+      </label>
+
+      <div id="statusMsg" class="status-msg"></div>
+
+      <div id="progressWrap" class="progress-wrap" hidden>
+        <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
+        <span id="progressText" class="progress-text">0%</span>
+      </div>
+
+      <div class="footer-buttons">
+        <button id="showBtn" class="btn" hidden>Show in folder</button>
+        <button id="cancelBtn" class="btn btn-danger" hidden>Cancel</button>
+        <button id="mergeBtn" class="btn btn-primary" disabled>Merge ▶</button>
+      </div>
+    </footer>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
