@@ -63,10 +63,13 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # On a version tag (e.g. v1.0.0) publish the exes to a GitHub Release.
+      # On a version tag (e.g. v1.0.0) publish the exes to a downloadable
+      # GitHub Release (published, not a draft, with auto-generated notes).
       - name: Publish to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          name: Video Merging Tool ${{ github.ref_name }}
           files: dist/*.exe
           fail_on_unmatched_files: true
+          generate_release_notes: true
