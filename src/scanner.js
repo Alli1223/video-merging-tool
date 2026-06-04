@@ -2,6 +2,7 @@ const fsp = require('fs').promises;
 const path = require('path');
 const ffmpeg = require('./ffmpeg');
 const { isVideoFile, resolveCaptureTime, compatKey, sortClips } = require('./metadata');
+const log = require('./logger');
 
 // Probe a list of files with bounded concurrency.
 async function probeAll(files) {
@@ -19,7 +20,8 @@ async function probeAll(files) {
           fsp.stat(file)
         ]);
         results[i] = { file, meta, stat };
-      } catch (_) {
+      } catch (e) {
+        log.warn('Could not probe', file, '-', String((e && e.message) || e));
         results[i] = null; // unreadable / not a real media file — drop it
       }
     }
@@ -32,10 +34,12 @@ async function probeAll(files) {
 }
 
 async function scanDirectory(dir) {
+  log.info('Scanning directory:', dir);
   const entries = await fsp.readdir(dir, { withFileTypes: true });
   const files = entries
     .filter((e) => e.isFile() && isVideoFile(e.name))
     .map((e) => path.join(dir, e.name));
+  log.info(`Found ${files.length} file(s) with a video extension`);
 
   const probed = await probeAll(files);
 
@@ -68,8 +72,11 @@ async function scanDirectory(dir) {
       };
     });
 
+  const stats = { matched: files.length, probed: probed.length, withVideo: clips.length };
+  log.info(`Scan complete: ${stats.matched} matched, ${stats.probed} probed OK, ${stats.withVideo} with a video stream`);
+
   // Default order: oldest first by capture time, name as a tiebreaker.
-  return { dir, clips: sortClips(clips, 'date-asc') };
+  return { dir, clips: sortClips(clips, 'date-asc'), stats };
 }
 
 module.exports = { scanDirectory };

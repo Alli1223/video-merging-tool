@@ -1,10 +1,12 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, screen } = require('electron');
 const path = require('path');
 const url = require('url');
+const fs = require('fs');
 const https = require('https');
 const { autoUpdater } = require('electron-updater');
 const { scanDirectory } = require('./src/scanner');
 const ffmpeg = require('./src/ffmpeg');
+const log = require('./src/logger');
 
 const GH_OWNER = 'Alli1223';
 const GH_REPO = 'video-merging-tool';
@@ -19,11 +21,18 @@ let mainWindow = null;
 let lastScanDir = null;
 
 function createWindow() {
+  // Fit the window within the screen's work area so the top bar and footer
+  // (and their buttons) are never pushed off-screen on smaller or scaled
+  // displays — e.g. a 1366x768 laptop can't fully show an 880px-tall window,
+  // which would clip the Shuffle button (top) and Merge button (bottom).
+  const { width: waW, height: waH } = screen.getPrimaryDisplay().workAreaSize;
+
   mainWindow = new BrowserWindow({
-    width: 1320,
-    height: 880,
-    minWidth: 960,
-    minHeight: 640,
+    width: Math.min(1280, waW - 40),
+    height: Math.min(820, waH - 60),
+    minWidth: Math.min(820, waW - 20),
+    minHeight: Math.min(540, waH - 40),
+    center: true,
     backgroundColor: '#0f1218',
     title: 'Video Merging Tool',
     webPreferences: {
@@ -32,6 +41,7 @@ function createWindow() {
       nodeIntegration: false
     }
   });
+  mainWindow.center();
 
   mainWindow.removeMenu();
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
@@ -46,12 +56,25 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  try {
+    const logDir = path.join(app.getPath('userData'), 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    log.setLogFile(path.join(logDir, 'app.log'));
+  } catch (e) {
+    console.error('Could not set up log file:', e);
+  }
+  log.info(`Video Merging Tool ${app.getVersion()} starting | platform=${process.platform} arch=${process.arch} packaged=${app.isPackaged}`);
+  log.info('FFmpeg binaries:', ffmpeg.binaryInfo());
+
   createWindow();
   setupAutoUpdates();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
+
+process.on('uncaughtException', (e) => log.error('uncaughtException:', (e && e.stack) || String(e)));
+process.on('unhandledRejection', (e) => log.error('unhandledRejection:', (e && e.stack) || String(e)));
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
@@ -72,7 +95,12 @@ ipcMain.handle('dialog:openFolder', async () => {
 
 ipcMain.handle('scan:directory', async (_e, dir) => {
   lastScanDir = dir;
-  return await scanDirectory(dir);
+  try {
+    return await scanDirectory(dir);
+  } catch (e) {
+    log.error('scan:directory failed for', dir, '-', (e && e.stack) || String(e));
+    throw e;
+  }
 });
 
 ipcMain.handle('thumbs:generate', async (_e, items) => {
@@ -101,11 +129,19 @@ ipcMain.handle('dialog:saveOutput', async (_e, defaultName) => {
 });
 
 ipcMain.handle('merge:start', async (_e, opts) => {
-  return await ffmpeg.merge(opts, (progress) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('merge:progress', progress);
-    }
-  });
+  log.info('merge:start', { mode: opts && opts.mode, clips: opts && opts.clips && opts.clips.length, output: opts && opts.outputPath });
+  try {
+    const res = await ffmpeg.merge(opts, (progress) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('merge:progress', progress);
+      }
+    });
+    log.info('merge finished:', res);
+    return res;
+  } catch (e) {
+    log.error('merge failed:', (e && e.stack) || String(e));
+    throw e;
+  }
 });
 
 ipcMain.handle('merge:cancel', async () => {
@@ -169,10 +205,10 @@ function runUpdateCheck() {
   if (canAutoUpdate) {
     autoUpdater.checkForUpdates().catch((e) =>
       sendUpdate({ state: 'error', message: String((e && e.message) || e) }));
-  } else if (app.isPackaged) {
-    checkLatestManually(); // portable build
   } else {
-    sendUpdate({ state: 'none' }); // dev run — nothing to update
+    // Portable build or running from source: can't self-install, but we can
+    // still tell the user whether a newer release exists (manual GitHub check).
+    checkLatestManually();
   }
 }
 
@@ -200,3 +236,24 @@ ipcMain.handle('update:download', async () => {
 });
 ipcMain.handle('update:install', async () => { autoUpdater.quitAndInstall(); return true; });
 ipcMain.handle('update:openReleases', async () => { await shell.openExternal(RELEASES_URL); return true; });
+
+ipcMain.handle('app:getVersion', () => app.getVersion());
+
+// Logging — the renderer forwards its console/errors here, and the Settings
+// dialog can open the log file or its folder.
+ipcMain.handle('log:write', (_e, level, message) => {
+  const fn = level === 'error' ? log.error : level === 'warn' ? log.warn : log.info;
+  fn('[renderer]', message);
+  return true;
+});
+ipcMain.handle('log:open', async () => {
+  const f = log.getLogFile();
+  if (f) await shell.openPath(f);
+  return f;
+});
+ipcMain.handle('log:reveal', async () => {
+  const f = log.getLogFile();
+  if (f) shell.showItemInFolder(f);
+  return f;
+});
+ipcMain.handle('log:path', () => log.getLogFile());

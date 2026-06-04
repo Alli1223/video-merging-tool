@@ -1,5 +1,13 @@
 'use strict';
 
+// Forward uncaught renderer errors to the log file so problems are visible.
+window.addEventListener('error', (e) => {
+  try { window.api.log('error', 'renderer error: ' + ((e.error && e.error.stack) || e.message)); } catch (_) {}
+});
+window.addEventListener('unhandledrejection', (e) => {
+  try { window.api.log('error', 'renderer unhandledrejection: ' + ((e.reason && e.reason.stack) || e.reason)); } catch (_) {}
+});
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -422,6 +430,7 @@ async function scan(dir) {
     el.loadingState.hidden = true;
     el.emptyState.hidden = false;
     setStatus('Could not read that folder: ' + (e.message || e), 'error');
+    window.api.log('error', 'Scan failed (renderer): ' + (e.message || e));
     return;
   }
 
@@ -430,16 +439,23 @@ async function scan(dir) {
 
   if (clips.length === 0) {
     el.emptyState.hidden = false;
-    setStatus('No video files found in that folder.', 'error');
+    const st = result.stats || {};
+    const msg = !st.matched
+      ? 'No video files found in that folder. (Subfolders are not scanned.)'
+      : `Found ${st.matched} file(s), but none had a readable video stream. See Settings → Open log file for details.`;
+    setStatus(msg, 'error');
+    window.api.log('warn', 'Scan produced 0 usable clips: ' + JSON.stringify(st));
     return;
   }
 
+  window.api.log('info', `Loaded ${clips.length} clip(s) from ${dir}`);
   el.listContainer.hidden = false;
   selectedId = null;
   el.previewPane.hidden = true;
   document.querySelector('.body').classList.remove('has-preview');
   setSortMode('date-asc');
   renderAll();
+  setStatus(`Loaded ${clips.length} clip${clips.length > 1 ? 's' : ''} — drag to reorder, then click Merge ▶ to create your video.`);
 
   // Fill in thumbnails asynchronously.
   window.api.generateThumbnails(clips.map((c) => ({ path: c.path, duration: c.duration })));
@@ -501,6 +517,7 @@ async function startMerge() {
     }
   } catch (e) {
     setStatus('Merge failed: ' + (e.message || e), 'error');
+    window.api.log('error', 'Merge failed (renderer): ' + (e.message || e));
   } finally {
     merging = false;
     el.cancelBtn.hidden = true;
@@ -561,6 +578,7 @@ function updateOutputDisplay() {
 // ---------------------------------------------------------------------------
 function handleUpdateStatus(p) {
   if (!p) return;
+  updateSettingsStatus(p);
   const banner = el.updateBanner;
   if (p.state === 'available') {
     el.updateText.textContent = `A new version (v${p.version}) is available.`;
@@ -585,6 +603,64 @@ function handleUpdateStatus(p) {
     banner.hidden = false;
   }
   // 'checking' / 'none' / 'error' → leave the banner hidden (silent).
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+async function openSettings() {
+  el.settingsOverlay.hidden = false;
+  try {
+    el.settingsVersion.textContent = 'v' + (await window.api.getVersion());
+  } catch (_) {
+    el.settingsVersion.textContent = '—';
+  }
+  try {
+    el.logPathText.textContent = await window.api.getLogPath();
+  } catch (_) { /* ignore */ }
+}
+
+function closeSettings() {
+  el.settingsOverlay.hidden = true;
+}
+
+async function checkForUpdatesManual() {
+  el.checkUpdatesBtn.disabled = true;
+  el.updateStatusText.textContent = 'Checking for updates…';
+  await window.api.checkForUpdate();
+}
+
+// Reflect update status inside the Settings dialog. The top banner handles the
+// at-a-glance prompt; this gives explicit feedback for the manual check.
+function updateSettingsStatus(p) {
+  if (!el.updateStatusText) return;
+  const ver = p && p.version ? 'v' + p.version : '';
+  switch (p && p.state) {
+    case 'checking':
+      el.updateStatusText.textContent = 'Checking for updates…';
+      el.checkUpdatesBtn.disabled = true;
+      break;
+    case 'progress':
+      el.updateStatusText.textContent = `Downloading ${ver}… ${Math.round(p.percent || 0)}%`;
+      el.checkUpdatesBtn.disabled = true;
+      break;
+    case 'available':
+      el.updateStatusText.textContent = `Update available: ${ver}`;
+      el.checkUpdatesBtn.disabled = false;
+      break;
+    case 'downloaded':
+      el.updateStatusText.textContent = `Update ${ver} downloaded — restart to install.`;
+      el.checkUpdatesBtn.disabled = false;
+      break;
+    case 'none':
+      el.updateStatusText.textContent = "You're on the latest version.";
+      el.checkUpdatesBtn.disabled = false;
+      break;
+    case 'error':
+      el.updateStatusText.textContent = "Couldn't check for updates — try again later.";
+      el.checkUpdatesBtn.disabled = false;
+      break;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -624,6 +700,16 @@ function init() {
   el.updateText = $('updateText');
   el.updateActionBtn = $('updateActionBtn');
   el.updateDismiss = $('updateDismiss');
+  el.settingsBtn = $('settingsBtn');
+  el.settingsOverlay = $('settingsOverlay');
+  el.settingsClose = $('settingsClose');
+  el.settingsVersion = $('settingsVersion');
+  el.checkUpdatesBtn = $('checkUpdatesBtn');
+  el.updateStatusText = $('updateStatusText');
+  el.openReleasesBtn = $('openReleasesBtn');
+  el.openLogBtn = $('openLogBtn');
+  el.openLogFolderBtn = $('openLogFolderBtn');
+  el.logPathText = $('logPathText');
 
   el.openBtn.addEventListener('click', openFolder);
   el.openBtn2.addEventListener('click', openFolder);
@@ -635,6 +721,14 @@ function init() {
   el.outputBtn.addEventListener('click', chooseOutput);
   el.keepCompatBtn.addEventListener('click', keepCompatibleOnly);
   el.updateDismiss.addEventListener('click', () => { el.updateBanner.hidden = true; });
+  el.settingsBtn.addEventListener('click', openSettings);
+  el.settingsClose.addEventListener('click', closeSettings);
+  el.settingsOverlay.addEventListener('click', (e) => { if (e.target === el.settingsOverlay) closeSettings(); });
+  el.checkUpdatesBtn.addEventListener('click', checkForUpdatesManual);
+  el.openReleasesBtn.addEventListener('click', () => window.api.openReleases());
+  el.openLogBtn.addEventListener('click', () => window.api.openLogFile());
+  el.openLogFolderBtn.addEventListener('click', () => window.api.revealLogFile());
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !el.settingsOverlay.hidden) closeSettings(); });
 
   // Thumbnails stream in one by one.
   window.api.onThumb(({ path, thumb }) => {

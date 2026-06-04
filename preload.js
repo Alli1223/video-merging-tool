@@ -37,6 +37,15 @@ contextBridge.exposeInMainWorld('api', {
   // Convert an absolute path to a file:// URL (used for the preview player).
   fileUrl: (p) => ipcRenderer.invoke('util:fileUrl', p),
 
+  // App info.
+  getVersion: () => ipcRenderer.invoke('app:getVersion'),
+
+  // Logging / diagnostics.
+  log: (level, message) => ipcRenderer.invoke('log:write', level, message),
+  openLogFile: () => ipcRenderer.invoke('log:open'),
+  revealLogFile: () => ipcRenderer.invoke('log:reveal'),
+  getLogPath: () => ipcRenderer.invoke('log:path'),
+
   // Auto-update (from the GitHub releases page).
   checkForUpdate: () => ipcRenderer.invoke('update:check'),
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
