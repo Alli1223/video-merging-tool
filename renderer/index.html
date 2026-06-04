@@ -27,6 +27,7 @@
           </select>
         </label>
         <button id="shuffleBtn" class="btn" disabled title="Put the clips in a random order">🔀 Shuffle</button>
+        <button id="settingsBtn" class="btn" title="Settings">⚙ Settings</button>
         <span id="folderPath" class="folder-path"></span>
       </div>
     </header>
@@ -111,6 +112,32 @@
         </div>
       </div>
     </footer>
+  </div>
+
+  <!-- Settings modal -->
+  <div id="settingsOverlay" class="modal-overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Settings">
+      <div class="modal-header">
+        <h2>Settings</h2>
+        <button id="settingsClose" class="icon-btn" title="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <section class="settings-section">
+          <h3>Updates</h3>
+          <div class="settings-row">
+            <span class="settings-label">Current version</span>
+            <span id="settingsVersion" class="muted">—</span>
+          </div>
+          <div class="settings-row">
+            <button id="checkUpdatesBtn" class="btn btn-primary">Check for updates</button>
+            <span id="updateStatusText" class="muted"></span>
+          </div>
+          <div class="settings-row">
+            <button id="openReleasesBtn" class="btn btn-small">View all releases</button>
+          </div>
+        </section>
+      </div>
+    </div>
   </div>
 
   <script src="renderer.js"></script>

@@ -561,6 +561,7 @@ function updateOutputDisplay() {
 // ---------------------------------------------------------------------------
 function handleUpdateStatus(p) {
   if (!p) return;
+  updateSettingsStatus(p);
   const banner = el.updateBanner;
   if (p.state === 'available') {
     el.updateText.textContent = `A new version (v${p.version}) is available.`;
@@ -585,6 +586,61 @@ function handleUpdateStatus(p) {
     banner.hidden = false;
   }
   // 'checking' / 'none' / 'error' → leave the banner hidden (silent).
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+async function openSettings() {
+  el.settingsOverlay.hidden = false;
+  try {
+    el.settingsVersion.textContent = 'v' + (await window.api.getVersion());
+  } catch (_) {
+    el.settingsVersion.textContent = '—';
+  }
+}
+
+function closeSettings() {
+  el.settingsOverlay.hidden = true;
+}
+
+async function checkForUpdatesManual() {
+  el.checkUpdatesBtn.disabled = true;
+  el.updateStatusText.textContent = 'Checking for updates…';
+  await window.api.checkForUpdate();
+}
+
+// Reflect update status inside the Settings dialog. The top banner handles the
+// at-a-glance prompt; this gives explicit feedback for the manual check.
+function updateSettingsStatus(p) {
+  if (!el.updateStatusText) return;
+  const ver = p && p.version ? 'v' + p.version : '';
+  switch (p && p.state) {
+    case 'checking':
+      el.updateStatusText.textContent = 'Checking for updates…';
+      el.checkUpdatesBtn.disabled = true;
+      break;
+    case 'progress':
+      el.updateStatusText.textContent = `Downloading ${ver}… ${Math.round(p.percent || 0)}%`;
+      el.checkUpdatesBtn.disabled = true;
+      break;
+    case 'available':
+      el.updateStatusText.textContent = `Update available: ${ver}`;
+      el.checkUpdatesBtn.disabled = false;
+      break;
+    case 'downloaded':
+      el.updateStatusText.textContent = `Update ${ver} downloaded — restart to install.`;
+      el.checkUpdatesBtn.disabled = false;
+      break;
+    case 'none':
+      el.updateStatusText.textContent = "You're on the latest version.";
+      el.checkUpdatesBtn.disabled = false;
+      break;
+    case 'error':
+      el.updateStatusText.textContent = "Couldn't check for updates — try again later.";
+      el.checkUpdatesBtn.disabled = false;
+      break;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -624,6 +680,13 @@ function init() {
   el.updateText = $('updateText');
   el.updateActionBtn = $('updateActionBtn');
   el.updateDismiss = $('updateDismiss');
+  el.settingsBtn = $('settingsBtn');
+  el.settingsOverlay = $('settingsOverlay');
+  el.settingsClose = $('settingsClose');
+  el.settingsVersion = $('settingsVersion');
+  el.checkUpdatesBtn = $('checkUpdatesBtn');
+  el.updateStatusText = $('updateStatusText');
+  el.openReleasesBtn = $('openReleasesBtn');
 
   el.openBtn.addEventListener('click', openFolder);
   el.openBtn2.addEventListener('click', openFolder);
@@ -635,6 +698,12 @@ function init() {
   el.outputBtn.addEventListener('click', chooseOutput);
   el.keepCompatBtn.addEventListener('click', keepCompatibleOnly);
   el.updateDismiss.addEventListener('click', () => { el.updateBanner.hidden = true; });
+  el.settingsBtn.addEventListener('click', openSettings);
+  el.settingsClose.addEventListener('click', closeSettings);
+  el.settingsOverlay.addEventListener('click', (e) => { if (e.target === el.settingsOverlay) closeSettings(); });
+  el.checkUpdatesBtn.addEventListener('click', checkForUpdatesManual);
+  el.openReleasesBtn.addEventListener('click', () => window.api.openReleases());
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !el.settingsOverlay.hidden) closeSettings(); });
 
   // Thumbnails stream in one by one.
   window.api.onThumb(({ path, thumb }) => {

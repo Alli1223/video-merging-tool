@@ -37,6 +37,9 @@ contextBridge.exposeInMainWorld('api', {
   // Convert an absolute path to a file:// URL (used for the preview player).
   fileUrl: (p) => ipcRenderer.invoke('util:fileUrl', p),
 
+  // App info.
+  getVersion: () => ipcRenderer.invoke('app:getVersion'),
+
   // Auto-update (from the GitHub releases page).
   checkForUpdate: () => ipcRenderer.invoke('update:check'),
   downloadUpdate: () => ipcRenderer.invoke('update:download'),

@@ -175,10 +175,10 @@ function runUpdateCheck() {
   if (canAutoUpdate) {
     autoUpdater.checkForUpdates().catch((e) =>
       sendUpdate({ state: 'error', message: String((e && e.message) || e) }));
-  } else if (app.isPackaged) {
-    checkLatestManually(); // portable build
   } else {
-    sendUpdate({ state: 'none' }); // dev run — nothing to update
+    // Portable build or running from source: can't self-install, but we can
+    // still tell the user whether a newer release exists (manual GitHub check).
+    checkLatestManually();
   }
 }
 
@@ -206,3 +206,5 @@ ipcMain.handle('update:download', async () => {
 });
 ipcMain.handle('update:install', async () => { autoUpdater.quitAndInstall(); return true; });
 ipcMain.handle('update:openReleases', async () => { await shell.openExternal(RELEASES_URL); return true; });
+
+ipcMain.handle('app:getVersion', () => app.getVersion());
