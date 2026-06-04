@@ -7,9 +7,13 @@ drag-and-drop timeline, and merges them into a single file.
 - **Lossless by default** — when all clips share the same codec, resolution and
   frame rate, the clips are stream-copied (`-c copy`), so the merge is instant
   and the quality is byte-for-byte identical to the originals.
-- **Automatic re-encode fallback** — if clips have mixed formats, the app
-  normalizes them to a common spec and re-encodes (H.264 / AAC, CRF 18) so the
-  merge still works.
+- **Choose the output, keep quality** — set a target resolution (up to 4K) and
+  frame rate (**Settings → Output & encoding**); clips already at the target are
+  kept **bit-for-bit lossless** and only the others are re-encoded to it. Quality
+  ranges from near-lossless (default) to true lossless.
+- **NVIDIA GPU (NVENC) encoding** — hardware-accelerated **H.264 or HEVC/H.265**,
+  auto-detected with an automatic CPU (x264/x265) fallback. Your preferences are
+  saved between sessions.
 - **Smart ordering** — clips are sorted by embedded capture time
   (`creation_time` metadata), falling back to a date in the filename, then the
   file's created/modified time. Each row shows which source was used.

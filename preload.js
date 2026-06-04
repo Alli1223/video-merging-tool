@@ -47,6 +47,11 @@ contextBridge.exposeInMainWorld('api', {
   getLogPath: () => ipcRenderer.invoke('log:path'),
   copyText: (text) => ipcRenderer.invoke('clipboard:write', text),
 
+  // Output / encoding settings + GPU encoder availability.
+  getSettings: () => ipcRenderer.invoke('settings:get'),
+  setSettings: (partial) => ipcRenderer.invoke('settings:set', partial),
+  getEncoderInfo: () => ipcRenderer.invoke('encoder:info'),
+
   // Auto-update (from the GitHub releases page).
   checkForUpdate: () => ipcRenderer.invoke('update:check'),
   downloadUpdate: () => ipcRenderer.invoke('update:download'),

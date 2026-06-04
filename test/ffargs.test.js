@@ -4,7 +4,8 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   parseFps, concatPath, concatListContent, isMp4Like,
-  buildCopyArgs, reencodeTarget, buildReencodeArgs, parseProgressTime, computePercent
+  buildCopyArgs, reencodeTarget, buildReencodeArgs, parseProgressTime, computePercent,
+  resolveTarget, buildVideoEncodeArgs, buildSegmentArgs
 } = require('../src/ffargs');
 
 test('parseFps handles fractions and edge cases', () => {
@@ -106,4 +107,47 @@ test('computePercent clamps within 0..99.5 during progress', () => {
   assert.equal(computePercent(50, 100), 50);
   assert.equal(computePercent(100, 100), 99.5); // never reports 100 mid-stream
   assert.equal(computePercent(10, 0), 0);       // unknown total
+});
+
+test('resolveTarget uses settings, falling back to auto (largest)', () => {
+  const clips = [{ width: 1920, height: 1080, fps: 30 }, { width: 1280, height: 720, fps: 60 }];
+  assert.deepEqual(resolveTarget(clips, {}), { W: 1920, H: 1080, F: 60 }); // auto = max dims + max fps
+  assert.deepEqual(resolveTarget(clips, { resolution: '2160', fps: '60' }), { W: 3840, H: 2160, F: 60 });
+  assert.deepEqual(resolveTarget(clips, { resolution: '1080', fps: '24' }), { W: 1920, H: 1080, F: 24 });
+});
+
+test('buildVideoEncodeArgs selects encoder/codec/quality correctly', () => {
+  assert.ok(buildVideoEncodeArgs('h264', true, 'near').join(' ').includes('h264_nvenc'));
+  assert.ok(buildVideoEncodeArgs('hevc', true, 'near').join(' ').includes('hevc_nvenc'));
+  assert.ok(buildVideoEncodeArgs('h264', false, 'near').join(' ').includes('libx264'));
+  assert.ok(buildVideoEncodeArgs('hevc', false, 'near').join(' ').includes('libx265'));
+  assert.ok(buildVideoEncodeArgs('h264', true, 'near').includes('-cq'));   // NVENC quality
+  assert.ok(buildVideoEncodeArgs('h264', false, 'near').includes('-crf')); // CPU quality
+  assert.ok(buildVideoEncodeArgs('h264', false, 'lossless').includes('-qp')); // x264 true-lossless
+  assert.ok(buildVideoEncodeArgs('h264', true, 'lossless').join(' ').includes('lossless'));
+  assert.ok(buildVideoEncodeArgs('hevc', true, 'near').join(' ').includes('hvc1')); // HEVC compat tag
+});
+
+test('buildSegmentArgs copies matching video and re-encodes the rest', () => {
+  const clip = { path: '/a.mp4', width: 3840, height: 2160, fps: 60, hasAudio: true, duration: 5 };
+  const target = { W: 3840, H: 2160, F: 60 };
+  const enc = { codec: 'hevc', useNvenc: true, quality: 'near' };
+
+  const copy = buildSegmentArgs(clip, target, enc, '/seg.mp4', true).join(' ');
+  assert.ok(copy.includes('-c:v copy'));         // matching clip kept losslessly
+  assert.ok(!copy.includes('hevc_nvenc'));
+  assert.ok(copy.includes('-c:a aac'));          // audio normalized for the join
+
+  const re = buildSegmentArgs(clip, target, enc, '/seg.mp4', false).join(' ');
+  assert.ok(re.includes('hevc_nvenc'));
+  assert.ok(re.includes('scale=3840:2160'));
+  assert.ok(!re.includes('-c:v copy'));
+});
+
+test('buildSegmentArgs adds a silent track for clips without audio', () => {
+  const clip = { path: '/a.mp4', width: 1280, height: 720, fps: 30, hasAudio: false, duration: 3 };
+  const s = buildSegmentArgs(clip, { W: 1920, H: 1080, F: 30 },
+    { codec: 'h264', useNvenc: false, quality: 'near' }, '/seg.mp4', false).join(' ');
+  assert.ok(s.includes('anullsrc'));
+  assert.ok(s.includes('-map 1:a:0'));
 });

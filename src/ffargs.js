@@ -50,11 +50,94 @@ function reencodeTarget(clips) {
   return { W, H, F };
 }
 
-// Re-encode fallback: normalize every clip to the common spec, then concatenate
-// with the concat filter. Clips without audio get a matched silent track from
-// an anullsrc lavfi input so the filter sees a uniform stream layout.
-function buildReencodeArgs(clips, outputPath, filterScriptPath) {
-  const { W, H, F } = reencodeTarget(clips);
+// Named output resolutions (16:9). Non-16:9 sources are letterboxed via pad.
+const RESOLUTIONS = {
+  2160: { w: 3840, h: 2160 },
+  1440: { w: 2560, h: 1440 },
+  1080: { w: 1920, h: 1080 },
+  720: { w: 1280, h: 720 }
+};
+
+// Resolve the output target {W,H,F} from the user's settings, falling back to
+// "auto" (match the largest dimensions / highest frame rate among the clips).
+function resolveTarget(clips, settings) {
+  settings = settings || {};
+  const auto = reencodeTarget(clips);
+  let { W, H, F } = auto;
+  const res = RESOLUTIONS[settings.resolution];
+  if (res) { W = res.w; H = res.h; }
+  if (settings.fps && settings.fps !== 'auto') {
+    const f = parseInt(settings.fps, 10);
+    if (f > 0) F = f;
+  }
+  return { W, H, F };
+}
+
+// Video encoder arguments for the chosen codec / GPU / quality.
+//   codec: 'h264' | 'hevc'   useNvenc: boolean
+//   quality: 'lossless' | 'near' (visually lossless) | 'high' | 'balanced'
+function buildVideoEncodeArgs(codec, useNvenc, quality) {
+  const isHevc = codec === 'hevc';
+  const args = [];
+  if (useNvenc) {
+    args.push('-c:v', isHevc ? 'hevc_nvenc' : 'h264_nvenc');
+    if (quality === 'lossless') {
+      args.push('-preset', 'p7', '-tune', 'lossless');
+    } else {
+      const cq = quality === 'high' ? '24' : quality === 'balanced' ? '28' : '19'; // 'near' default
+      args.push('-preset', 'p7', '-rc', 'vbr', '-cq', cq, '-b:v', '0');
+    }
+  } else {
+    args.push('-c:v', isHevc ? 'libx265' : 'libx264');
+    if (quality === 'lossless') {
+      if (isHevc) args.push('-preset', 'medium', '-x265-params', 'lossless=1');
+      else args.push('-preset', 'veryslow', '-qp', '0');
+    } else {
+      const crf = quality === 'high' ? (isHevc ? '22' : '20')
+        : quality === 'balanced' ? (isHevc ? '26' : '23')
+          : (isHevc ? '18' : '16'); // 'near' default (visually lossless)
+      args.push('-preset', isHevc ? 'medium' : 'slow', '-crf', crf);
+    }
+  }
+  args.push('-pix_fmt', 'yuv420p');
+  if (isHevc) args.push('-tag:v', 'hvc1'); // play HEVC in QuickTime/most players
+  return args;
+}
+
+// Args to turn ONE clip into a target-spec segment file. When copyVideo is true
+// (the clip already matches the target) the video is stream-copied (lossless)
+// and only the audio is normalized; otherwise the video is scaled/padded/fps-
+// converted and re-encoded. Audio is always normalized to AAC 48k stereo so all
+// segments can be concatenated by stream copy afterwards.
+function buildSegmentArgs(clip, target, encOpts, outPath, copyVideo) {
+  const { W, H, F } = target;
+  const args = ['-i', clip.path];
+  const hasAudio = !!clip.hasAudio;
+  if (!hasAudio) {
+    const dur = clip.duration > 0 ? clip.duration : 1;
+    args.push('-f', 'lavfi', '-t', String(dur), '-i', 'anullsrc=r=48000:cl=stereo');
+  }
+  args.push('-map', '0:v:0', '-map', hasAudio ? '0:a:0' : '1:a:0');
+  if (copyVideo) {
+    args.push('-c:v', 'copy');
+  } else {
+    args.push('-vf',
+      `scale=${W}:${H}:force_original_aspect_ratio=decrease,` +
+      `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${F},format=yuv420p`);
+    args.push(...buildVideoEncodeArgs(encOpts.codec, encOpts.useNvenc, encOpts.quality));
+  }
+  args.push('-c:a', 'aac', '-ar', '48000', '-ac', '2', '-b:a', '320k');
+  args.push('-movflags', '+faststart', outPath);
+  return args;
+}
+
+// Re-encode fallback: normalize every clip to the target spec with the concat
+// filter, in one pass. Used when the per-segment join can't be stream-copied.
+// Clips without audio get a matched silent track so the filter sees uniform
+// streams. The (potentially huge) graph is written to filterScriptPath.
+function buildReencodeArgs(clips, outputPath, filterScriptPath, target, encOpts) {
+  const { W, H, F } = (target && target.W) ? target : reencodeTarget(clips);
+  encOpts = encOpts || { codec: 'h264', useNvenc: false, quality: 'near' };
   const anyAudio = clips.some((c) => c.hasAudio);
 
   const inputArgs = [];
@@ -107,8 +190,8 @@ function buildReencodeArgs(clips, outputPath, filterScriptPath) {
   // filterScriptPath.
   const args = [...inputArgs, '-filter_complex_script', filterScriptPath, '-map', '[v]'];
   if (anyAudio) args.push('-map', '[a]');
-  args.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p');
-  if (anyAudio) args.push('-c:a', 'aac', '-b:a', '192k');
+  args.push(...buildVideoEncodeArgs(encOpts.codec, encOpts.useNvenc, encOpts.quality));
+  if (anyAudio) args.push('-c:a', 'aac', '-b:a', '320k');
   else args.push('-an');
   if (isMp4Like(outputPath)) args.push('-movflags', '+faststart');
   args.push(outputPath);
@@ -136,7 +219,11 @@ module.exports = {
   isMp4Like,
   buildCopyArgs,
   reencodeTarget,
+  resolveTarget,
+  buildVideoEncodeArgs,
+  buildSegmentArgs,
   buildReencodeArgs,
   parseProgressTime,
-  computePercent
+  computePercent,
+  RESOLUTIONS
 };

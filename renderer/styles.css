@@ -512,3 +512,7 @@ select:disabled { opacity: 0.5; }
 }
 .icon-btn:hover { color: var(--text); background: var(--bg-3); }
 .log-path { font-size: 11px; word-break: break-all; }
+.output-info { font-size: 12px; }
+.encoder-info { font-size: 11px; }
+.setting-note { font-size: 11px; line-height: 1.5; }
+.modal .settings-row select { flex: 1; min-width: 0; }

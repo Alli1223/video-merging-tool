@@ -6,7 +6,7 @@ const ffmpegStatic = require('ffmpeg-static');
 const ffprobeStatic = require('ffprobe-static');
 const {
   parseFps, concatListContent, buildCopyArgs, buildReencodeArgs,
-  parseProgressTime, computePercent
+  resolveTarget, buildSegmentArgs, parseProgressTime, computePercent
 } = require('./ffargs');
 const log = require('./logger');
 
@@ -41,6 +41,39 @@ function binaryInfo() {
     ffprobe: FFPROBE,
     ffprobeExists: !!(FFPROBE && fs.existsSync(FFPROBE))
   };
+}
+
+// ---------------------------------------------------------------------------
+// Encoder detection (NVIDIA NVENC)
+// ---------------------------------------------------------------------------
+let encoderCache = null;
+
+function probeEncoder(name) {
+  return new Promise((resolve) => {
+    const args = ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
+      '-i', 'color=c=black:s=256x144:r=30', '-frames:v', '1', '-c:v', name, '-f', 'null', '-'];
+    const p = spawn(FFMPEG, args);
+    p.stderr.on('data', () => {});
+    p.on('error', () => resolve(false));
+    p.on('close', (code) => resolve(code === 0));
+  });
+}
+
+// Detect which NVENC encoders actually work here (needs an NVIDIA GPU + drivers).
+async function detectEncoders() {
+  if (encoderCache) return encoderCache;
+  if (!FFMPEG) return { h264_nvenc: false, hevc_nvenc: false };
+  const [h264, hevc] = await Promise.all([probeEncoder('h264_nvenc'), probeEncoder('hevc_nvenc')]);
+  encoderCache = { h264_nvenc: h264, hevc_nvenc: hevc };
+  log.info('Encoder detection (NVENC):', encoderCache);
+  return encoderCache;
+}
+
+// Does this clip already match the target video spec exactly (so it can be kept
+// losslessly via stream copy)?
+function matchesTargetVideo(clip, target, codecName) {
+  return clip.width === target.W && clip.height === target.H &&
+    Math.round(clip.fps || 0) === target.F && clip.vcodec === codecName;
 }
 
 // ---------------------------------------------------------------------------
@@ -216,11 +249,11 @@ async function mergeCopy(clips, outputPath, totalDuration, onProgress) {
   return { success: true, mode: 'copy', outputPath };
 }
 
-async function mergeReencode(clips, outputPath, totalDuration, onProgress) {
-  // Write the (potentially huge) filter graph to a file so the command line
-  // can't overflow the OS limit with many clips (spawn ENAMETOOLONG).
+async function mergeReencode(clips, outputPath, target, encOpts, totalDuration, onProgress) {
+  // Full single-pass re-encode with the concat filter (fallback path). The
+  // (potentially huge) filter graph goes to a file to avoid command-line limits.
   const filterScript = path.join(os.tmpdir(), `vmt-filter-${process.pid}-${Date.now()}.txt`);
-  const { args, filterComplex } = buildReencodeArgs(clips, outputPath, filterScript);
+  const { args, filterComplex } = buildReencodeArgs(clips, outputPath, filterScript, target, encOpts);
   fs.writeFileSync(filterScript, filterComplex, 'utf8');
   try {
     await runFfmpeg(args, totalDuration, onProgress);
@@ -230,27 +263,81 @@ async function mergeReencode(clips, outputPath, totalDuration, onProgress) {
   return { success: true, mode: 'reencode', outputPath };
 }
 
+// Per-clip path: clips that already match the target keep their video stream
+// (lossless); the rest are re-encoded to the target. Each clip becomes a
+// normalized segment, then all segments are joined by stream copy. Falls back
+// to a full re-encode if the stream-copy join fails.
+async function mergeHybrid(clips, outputPath, target, encOpts, codecName, totalDuration, onProgress, forceReencode) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vmt-seg-'));
+  const segments = [];
+  try {
+    let done = 0;
+    for (let i = 0; i < clips.length; i++) {
+      if (canceled) { const e = new Error('Merge canceled'); e.canceled = true; throw e; }
+      const clip = clips[i];
+      const seg = path.join(tmpDir, `seg-${String(i).padStart(4, '0')}.mp4`);
+      const copyVideo = !forceReencode && matchesTargetVideo(clip, target, codecName);
+      const args = buildSegmentArgs(clip, target, encOpts, seg, copyVideo);
+      const base = done;
+      await runFfmpeg(args, clip.duration || 0, (p) => {
+        // Per-clip processing occupies 0..92% of the progress bar.
+        onProgress({ percent: computePercent(base + (p.seconds || 0), totalDuration) * 0.92, phase: 'encoding', clip: i + 1, total: clips.length });
+      });
+      done += clip.duration || 0;
+      segments.push(seg);
+    }
+
+    const listFile = path.join(tmpDir, 'segments.txt');
+    fs.writeFileSync(listFile, concatListContent(segments.map((s) => ({ path: s }))), 'utf8');
+    try {
+      await runFfmpeg(buildCopyArgs(listFile, outputPath), totalDuration,
+        (p) => onProgress({ percent: 92 + (p.percent || 0) * 0.08, phase: 'joining' }));
+    } catch (joinErr) {
+      if (canceled) throw joinErr;
+      log.warn('Stream-copy join failed; falling back to a full re-encode:', String((joinErr && joinErr.message) || joinErr));
+      await mergeReencode(clips, outputPath, target, encOpts, totalDuration, onProgress);
+    }
+    return { success: true, mode: 'hybrid', outputPath };
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) { /* ignore */ }
+  }
+}
+
 // Entry point used by the IPC handler.
 async function merge(opts, onProgress) {
   assertBinaries();
   canceled = false;
-  const { clips, outputPath, mode } = opts;
+  const { clips, outputPath, forceReencode } = opts;
+  const settings = opts.settings || {};
 
   if (!clips || clips.length === 0) throw new Error('No clips to merge.');
   if (!outputPath) throw new Error('No output path provided.');
 
+  const target = resolveTarget(clips, settings);
+  const codec = settings.codec === 'hevc' ? 'hevc' : 'h264';
+  const quality = settings.quality || 'near';
+
+  // Resolve GPU vs CPU.
+  const enc = await detectEncoders();
+  const nvencForCodec = codec === 'hevc' ? enc.hevc_nvenc : enc.h264_nvenc;
+  const wanted = settings.encoder || 'auto';
+  const useNvenc = wanted === 'cpu' ? false : nvencForCodec;
+  if (wanted === 'nvenc' && !nvencForCodec) log.warn('NVENC requested but unavailable for', codec, '- using CPU.');
+  const encOpts = { codec, useNvenc, quality };
+  log.info('Merge:', { clips: clips.length, target, codec, quality, encoder: wanted, useNvenc });
+
   const totalDuration = clips.reduce((sum, c) => sum + (c.duration || 0), 0);
 
   try {
-    if (mode === 'reencode') {
-      return await mergeReencode(clips, outputPath, totalDuration, onProgress);
+    const allMatch = clips.every((c) => matchesTargetVideo(c, target, codec));
+    const allCompat = new Set(clips.map((c) => c.compatKey)).size === 1;
+    if (!forceReencode && allMatch && allCompat) {
+      return await mergeCopy(clips, outputPath, totalDuration, onProgress);
     }
-    return await mergeCopy(clips, outputPath, totalDuration, onProgress);
+    return await mergeHybrid(clips, outputPath, target, encOpts, codec, totalDuration, onProgress, forceReencode);
   } catch (err) {
     safeUnlink(outputPath); // remove the half-written output
-    if (err && err.canceled) {
-      return { success: false, canceled: true };
-    }
+    if (err && err.canceled) return { success: false, canceled: true };
     throw err;
   }
 }
@@ -262,4 +349,4 @@ function cancel() {
   }
 }
 
-module.exports = { probeFile, generateThumbnails, merge, cancel, binaryInfo };
+module.exports = { probeFile, generateThumbnails, merge, cancel, binaryInfo, detectEncoders };
