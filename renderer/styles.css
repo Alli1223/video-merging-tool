@@ -30,8 +30,18 @@ html, body {
 .app {
   display: grid;
   grid-template-rows: auto auto 1fr auto auto;
+  grid-template-columns: minmax(0, 1fr);
   height: 100vh;
 }
+
+/* Let the grid/flex children shrink so the clip list and timeline scroll
+   *inside* their own areas and can never push the toolbar or footer (Merge
+   button) off-screen — horizontally (a wide timeline of many clips, the real
+   culprit) or vertically. minmax(0,1fr) + min-width:0 stop content from
+   stretching the layout wider than the window. */
+.topbar, .update-banner, .body, .timeline-wrap, .footer { min-width: 0; }
+.body, .list-pane, .list-container, .clip-list { min-height: 0; }
+.clip-info { min-width: 0; }
 
 /* ---------- Top bar ---------- */
 .topbar {

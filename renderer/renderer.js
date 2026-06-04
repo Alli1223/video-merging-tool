@@ -455,6 +455,7 @@ async function scan(dir) {
   document.querySelector('.body').classList.remove('has-preview');
   setSortMode('date-asc');
   renderAll();
+  setStatus(`Loaded ${clips.length} clip${clips.length > 1 ? 's' : ''} — drag to reorder, then click Merge ▶ to create your video.`);
 
   // Fill in thumbnails asynchronously.
   window.api.generateThumbnails(clips.map((c) => ({ path: c.path, duration: c.duration })));

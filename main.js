@@ -28,10 +28,11 @@ function createWindow() {
   const { width: waW, height: waH } = screen.getPrimaryDisplay().workAreaSize;
 
   mainWindow = new BrowserWindow({
-    width: Math.min(1320, waW - 40),
-    height: Math.min(880, waH - 40),
-    minWidth: Math.min(900, waW - 20),
-    minHeight: Math.min(600, waH - 20),
+    width: Math.min(1280, waW - 40),
+    height: Math.min(820, waH - 60),
+    minWidth: Math.min(820, waW - 20),
+    minHeight: Math.min(540, waH - 40),
+    center: true,
     backgroundColor: '#0f1218',
     title: 'Video Merging Tool',
     webPreferences: {
@@ -40,6 +41,7 @@ function createWindow() {
       nodeIntegration: false
     }
   });
+  mainWindow.center();
 
   mainWindow.removeMenu();
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
