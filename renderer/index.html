@@ -77,6 +77,7 @@
       <div class="timeline-head">
         <span class="timeline-title">Timeline</span>
         <span id="totalDuration" class="muted"></span>
+        <span id="outputInfo" class="muted output-info"></span>
         <span id="compatBadge" class="badge" hidden></span>
         <button id="keepCompatBtn" class="btn btn-small" hidden title="Remove the clips whose format differs, so the rest can merge losslessly"></button>
         <span class="spacer"></span>
@@ -92,9 +93,9 @@
       <div class="footer-row">
         <button id="outputBtn" class="btn" disabled title="Choose where the merged video is saved">📂 Save to…</button>
         <span id="outputPath" class="output-path" title="">You'll be asked where to save when you click Merge</span>
-        <label class="reencode-toggle" title="Re-encode is required when clips have different codecs, resolutions or frame rates.">
+        <label class="reencode-toggle" title="Re-encode every clip to the target — even ones that already match it (overrides keep-lossless).">
           <input type="checkbox" id="reencodeToggle" disabled />
-          <span id="reencodeLabel">Re-encode (lossless when off)</span>
+          <span id="reencodeLabel">Force re-encode every clip</span>
         </label>
       </div>
       <div class="footer-row">
@@ -123,6 +124,59 @@
         <button id="settingsClose" class="icon-btn" title="Close">✕</button>
       </div>
       <div class="modal-body">
+        <section class="settings-section">
+          <h3>Output &amp; encoding</h3>
+          <div class="settings-row">
+            <label class="settings-label" for="setResolution">Resolution</label>
+            <select id="setResolution">
+              <option value="auto">Match largest source</option>
+              <option value="2160">4K — 3840×2160</option>
+              <option value="1440">1440p — 2560×1440</option>
+              <option value="1080">1080p — 1920×1080</option>
+              <option value="720">720p — 1280×720</option>
+            </select>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="setFps">Frame rate</label>
+            <select id="setFps">
+              <option value="auto">Match highest source</option>
+              <option value="60">60 fps</option>
+              <option value="50">50 fps</option>
+              <option value="30">30 fps</option>
+              <option value="25">25 fps</option>
+              <option value="24">24 fps</option>
+            </select>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="setEncoder">Encoder</label>
+            <select id="setEncoder">
+              <option value="auto">Auto (GPU if available)</option>
+              <option value="nvenc">NVIDIA GPU (NVENC)</option>
+              <option value="cpu">CPU (x264 / x265)</option>
+            </select>
+            <span id="encoderInfo" class="muted encoder-info"></span>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="setCodec">Codec</label>
+            <select id="setCodec">
+              <option value="h264">H.264 (most compatible)</option>
+              <option value="hevc">HEVC / H.265 (smaller 4K)</option>
+            </select>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="setQuality">Quality</label>
+            <select id="setQuality">
+              <option value="near">Near-lossless (recommended)</option>
+              <option value="lossless">True lossless (very large)</option>
+              <option value="high">High</option>
+              <option value="balanced">Balanced (smaller)</option>
+            </select>
+          </div>
+          <div class="settings-row">
+            <span class="muted setting-note">Clips already at the target are kept lossless; only the others are re-encoded to it.</span>
+          </div>
+        </section>
+
         <section class="settings-section">
           <h3>Updates</h3>
           <div class="settings-row">

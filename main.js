@@ -20,6 +20,20 @@ const canAutoUpdate = app.isPackaged && !process.env.PORTABLE_EXECUTABLE_DIR;
 let mainWindow = null;
 let lastScanDir = null;
 
+// Persisted output/encoding preferences (userData/settings.json).
+const DEFAULT_SETTINGS = { resolution: 'auto', fps: 'auto', encoder: 'auto', codec: 'h264', quality: 'near' };
+let settings = { ...DEFAULT_SETTINGS };
+
+function settingsFile() { return path.join(app.getPath('userData'), 'settings.json'); }
+function loadSettings() {
+  try { settings = { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(settingsFile(), 'utf8')) }; }
+  catch (_) { settings = { ...DEFAULT_SETTINGS }; }
+}
+function saveSettings() {
+  try { fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2)); }
+  catch (e) { log.error('Could not save settings:', String((e && e.message) || e)); }
+}
+
 function createWindow() {
   // Fit the window within the screen's work area so the top bar and footer
   // (and their buttons) are never pushed off-screen on smaller or scaled
@@ -65,6 +79,9 @@ app.whenReady().then(() => {
   }
   log.info(`Video Merging Tool ${app.getVersion()} starting | platform=${process.platform} arch=${process.arch} packaged=${app.isPackaged}`);
   log.info('FFmpeg binaries:', ffmpeg.binaryInfo());
+  loadSettings();
+  log.info('Settings:', settings);
+  ffmpeg.detectEncoders().then((e) => log.info('NVENC available:', e)).catch(() => {});
 
   createWindow();
   setupAutoUpdates();
@@ -129,9 +146,10 @@ ipcMain.handle('dialog:saveOutput', async (_e, defaultName) => {
 });
 
 ipcMain.handle('merge:start', async (_e, opts) => {
-  log.info('merge:start', { mode: opts && opts.mode, clips: opts && opts.clips && opts.clips.length, output: opts && opts.outputPath });
+  const fullOpts = { ...opts, settings };
+  log.info('merge:start', { clips: opts && opts.clips && opts.clips.length, output: opts && opts.outputPath, forceReencode: opts && opts.forceReencode, settings });
   try {
-    const res = await ffmpeg.merge(opts, (progress) => {
+    const res = await ffmpeg.merge(fullOpts, (progress) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('merge:progress', progress);
       }
@@ -258,3 +276,16 @@ ipcMain.handle('log:reveal', async () => {
 });
 ipcMain.handle('log:path', () => log.getLogFile());
 ipcMain.handle('clipboard:write', (_e, text) => { clipboard.writeText(String(text == null ? '' : text)); return true; });
+
+// Output / encoding settings + GPU encoder availability.
+ipcMain.handle('settings:get', () => settings);
+ipcMain.handle('settings:set', (_e, partial) => {
+  settings = { ...settings, ...(partial || {}) };
+  saveSettings();
+  log.info('Settings updated:', settings);
+  return settings;
+});
+ipcMain.handle('encoder:info', async () => {
+  try { return await ffmpeg.detectEncoders(); }
+  catch (_) { return { h264_nvenc: false, hevc_nvenc: false }; }
+});

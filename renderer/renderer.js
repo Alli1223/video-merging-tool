@@ -19,6 +19,8 @@ let merging = false;
 let lastOutput = null;
 let outputPath = null; // user-chosen save location (null = ask at merge time)
 let lastStatusText = '';
+let settings = { resolution: 'auto', fps: 'auto', encoder: 'auto', codec: 'h264', quality: 'near' };
+let encoderInfo = { h264_nvenc: false, hevc_nvenc: false };
 
 const el = {};
 const $ = (id) => document.getElementById(id);
@@ -69,6 +71,38 @@ function compatibility() {
   if (clips.length === 0) return { lossless: false, keys: 0 };
   const keys = new Set(clips.map((c) => c.compatKey));
   return { lossless: keys.size === 1, keys: keys.size };
+}
+
+// Named output resolutions (kept in sync with src/ffargs.js RESOLUTIONS).
+const RES = { 2160: [3840, 2160], 1440: [2560, 1440], 1080: [1920, 1080], 720: [1280, 720] };
+
+// Resolve the output target {W,H,F} from settings + clips (for display + the
+// "what will happen" summary). The main process resolves it authoritatively.
+function resolveTargetLocal() {
+  let W = 0, H = 0, F = 0;
+  for (const c of clips) { if (c.width > W) W = c.width; if (c.height > H) H = c.height; if (c.fps > F) F = c.fps; }
+  W = Math.max(2, W - (W % 2)); H = Math.max(2, H - (H % 2));
+  F = F > 0 ? Math.min(Math.round(F), 60) : 30;
+  if (RES[settings.resolution]) { W = RES[settings.resolution][0]; H = RES[settings.resolution][1]; }
+  if (settings.fps && settings.fps !== 'auto') { const f = parseInt(settings.fps, 10); if (f > 0) F = f; }
+  return { W, H, F };
+}
+
+function matchesTargetLocal(c, t, codec) {
+  return c.width === t.W && c.height === t.H && Math.round(c.fps || 0) === t.F && c.vcodec === codec;
+}
+
+// What the merge will produce given the current clips + settings.
+function outputPlan() {
+  const t = resolveTargetLocal();
+  const codec = settings.codec === 'hevc' ? 'hevc' : 'h264';
+  const matching = clips.filter((c) => matchesTargetLocal(c, t, codec)).length;
+  const allCompat = clips.length > 0 && new Set(clips.map((c) => c.compatKey)).size === 1;
+  const pureCopy = clips.length > 0 && matching === clips.length && allCompat;
+  const nvencKey = codec === 'hevc' ? 'hevc_nvenc' : 'h264_nvenc';
+  const usingGpu = settings.encoder === 'nvenc' || (settings.encoder === 'auto' && encoderInfo[nvencKey]);
+  const encLabel = settings.encoder === 'cpu' ? 'CPU' : (usingGpu ? 'GPU' : 'CPU');
+  return { t, codec, matching, pureCopy, encLabel };
 }
 
 // The "majority" compat key — clips that differ from it are the odd ones out.
@@ -181,43 +215,43 @@ function updateSummary() {
     : '';
   el.totalDuration.textContent = clips.length ? `Total length: ${fmtDuration(total)}` : '';
 
-  const { lossless } = compatibility();
   const badge = el.compatBadge;
   if (clips.length === 0) {
     badge.hidden = true;
-  } else if (lossless) {
-    badge.hidden = false;
-    badge.className = 'badge ok';
-    badge.textContent = '✓ Lossless merge';
-  } else {
-    badge.hidden = false;
-    badge.className = 'badge warn';
-    badge.textContent = '⚠ Mixed formats — needs re-encode';
+    el.keepCompatBtn.hidden = true;
+    if (el.outputInfo) el.outputInfo.textContent = '';
+    return;
   }
 
-  // Offer a one-click way to drop the odd-format clips for a lossless merge.
+  const plan = outputPlan();
+  if (el.outputInfo) {
+    el.outputInfo.textContent = `→ ${plan.t.W}×${plan.t.H} @ ${plan.t.F}fps · ${plan.codec === 'hevc' ? 'HEVC' : 'H.264'} (${plan.encLabel})`;
+  }
+  badge.hidden = false;
+  if (plan.pureCopy) {
+    badge.className = 'badge ok';
+    badge.textContent = '✓ Lossless — all clips match the target';
+  } else if (plan.matching > 0) {
+    badge.className = 'badge ok';
+    badge.textContent = `✓ ${plan.matching} kept lossless · ${clips.length - plan.matching} re-encoded`;
+  } else {
+    badge.className = 'badge warn';
+    badge.textContent = `Re-encoding all ${clips.length} clips to target`;
+  }
+
+  // Offer a one-click way to drop clips that differ from the majority format.
   const mismatched = countMismatched();
   el.keepCompatBtn.hidden = mismatched === 0;
   if (mismatched > 0) el.keepCompatBtn.textContent = `Drop ${mismatched} mismatched`;
 }
 
-// Enable/disable the re-encode toggle and merge button based on current state.
+// Enable/disable controls based on current state.
 function updateMergeControls() {
-  const { lossless } = compatibility();
   const has = clips.length > 0;
 
-  if (!has) {
-    el.reencodeToggle.disabled = true;
-    el.reencodeToggle.checked = false;
-  } else if (!lossless) {
-    // Mixed formats: re-encode is mandatory.
-    el.reencodeToggle.checked = true;
-    el.reencodeToggle.disabled = true;
-    el.reencodeLabel.textContent = 'Re-encode (required — clips differ)';
-  } else {
-    el.reencodeToggle.disabled = merging;
-    el.reencodeLabel.textContent = 'Re-encode (lossless when off)';
-  }
+  // The toggle now means "force re-encode everything" (override keep-lossless).
+  el.reencodeToggle.disabled = !has || merging;
+  el.reencodeLabel.textContent = 'Force re-encode every clip';
 
   el.mergeBtn.disabled = !has || merging;
   el.sortSelect.disabled = !has || merging;
@@ -467,19 +501,18 @@ async function scan(dir) {
 // ---------------------------------------------------------------------------
 async function startMerge() {
   if (clips.length === 0 || merging) return;
-  const reencode = el.reencodeToggle.checked;
-  const { lossless } = compatibility();
-  const mode = (!lossless || reencode) ? 'reencode' : 'copy';
+  const forceReencode = el.reencodeToggle.checked;
+  const plan = outputPlan();
 
-  // Use the location the user already chose, or ask now.
-  let target = outputPath;
-  if (!target) {
-    target = await window.api.saveOutput(suggestedOutputName());
-    if (!target) return;
-    outputPath = target;
+  // Use the chosen output location, or ask now.
+  let out = outputPath;
+  if (!out) {
+    out = await window.api.saveOutput(suggestedOutputName());
+    if (!out) return;
+    outputPath = out;
     updateOutputDisplay();
   }
-  lastOutput = target;
+  lastOutput = out;
 
   merging = true;
   resetMergeUi();
@@ -488,14 +521,14 @@ async function startMerge() {
   el.mergeBtn.hidden = true;
   el.showBtn.hidden = true;
   setProgress(0);
-  setStatus(mode === 'copy'
+  setStatus((plan.pureCopy && !forceReencode)
     ? 'Merging losslessly (stream copy)…'
-    : 'Re-encoding and merging — this can take a while…');
+    : `Encoding to ${plan.t.W}×${plan.t.H} @ ${plan.t.F}fps · ${plan.codec === 'hevc' ? 'HEVC' : 'H.264'} (${plan.encLabel})… this can take a while.`);
   updateMergeControls();
 
   const payload = {
-    outputPath: target,
-    mode,
+    outputPath: out,
+    forceReencode,
     clips: clips.map((c) => ({
       path: c.path,
       duration: c.duration,
@@ -503,7 +536,9 @@ async function startMerge() {
       hasAudio: c.hasAudio,
       width: c.width,
       height: c.height,
-      fps: c.fps
+      fps: c.fps,
+      vcodec: c.vcodec,
+      compatKey: c.compatKey
     }))
   };
 
@@ -560,8 +595,8 @@ async function copyStatus() {
 // ---------------------------------------------------------------------------
 function suggestedOutputName() {
   const base = (folderPath ? folderPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() : 'merged') || 'merged';
-  const { lossless } = compatibility();
-  const ext = (!lossless || el.reencodeToggle.checked) ? 'mp4' : ((clips[0] && clips[0].ext) || 'mp4');
+  const plan = outputPlan();
+  const ext = (plan.pureCopy && !el.reencodeToggle.checked) ? ((clips[0] && clips[0].ext) || 'mp4') : 'mp4';
   return `${base}_merged.${ext}`;
 }
 
@@ -676,6 +711,46 @@ function updateSettingsStatus(p) {
 }
 
 // ---------------------------------------------------------------------------
+// Output & encoding settings
+// ---------------------------------------------------------------------------
+async function loadSettingsIntoUi() {
+  try {
+    settings = { ...settings, ...(await window.api.getSettings()) };
+    encoderInfo = (await window.api.getEncoderInfo()) || encoderInfo;
+  } catch (_) { /* ignore */ }
+  el.setResolution.value = settings.resolution || 'auto';
+  el.setFps.value = settings.fps || 'auto';
+  el.setEncoder.value = settings.encoder || 'auto';
+  el.setCodec.value = settings.codec || 'h264';
+  el.setQuality.value = settings.quality || 'near';
+  updateEncoderInfoLabel();
+  updateSummary();
+}
+
+async function onSettingChange() {
+  settings = {
+    resolution: el.setResolution.value,
+    fps: el.setFps.value,
+    encoder: el.setEncoder.value,
+    codec: el.setCodec.value,
+    quality: el.setQuality.value
+  };
+  updateEncoderInfoLabel();
+  updateSummary();
+  try { await window.api.setSettings(settings); } catch (_) { /* ignore */ }
+}
+
+function updateEncoderInfoLabel() {
+  if (!el.encoderInfo) return;
+  const parts = [];
+  if (encoderInfo.h264_nvenc) parts.push('H.264');
+  if (encoderInfo.hevc_nvenc) parts.push('HEVC');
+  el.encoderInfo.textContent = parts.length
+    ? `NVENC available: ${parts.join(', ')}`
+    : 'No NVIDIA NVENC detected — CPU will be used';
+}
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 function init() {
@@ -723,6 +798,13 @@ function init() {
   el.openLogBtn = $('openLogBtn');
   el.openLogFolderBtn = $('openLogFolderBtn');
   el.logPathText = $('logPathText');
+  el.outputInfo = $('outputInfo');
+  el.setResolution = $('setResolution');
+  el.setFps = $('setFps');
+  el.setEncoder = $('setEncoder');
+  el.setCodec = $('setCodec');
+  el.setQuality = $('setQuality');
+  el.encoderInfo = $('encoderInfo');
 
   el.openBtn.addEventListener('click', openFolder);
   el.openBtn2.addEventListener('click', openFolder);
@@ -743,6 +825,9 @@ function init() {
   el.openLogBtn.addEventListener('click', () => window.api.openLogFile());
   el.openLogFolderBtn.addEventListener('click', () => window.api.revealLogFile());
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !el.settingsOverlay.hidden) closeSettings(); });
+  ['setResolution', 'setFps', 'setEncoder', 'setCodec', 'setQuality'].forEach((id) => {
+    el[id].addEventListener('change', onSettingChange);
+  });
 
   // Thumbnails stream in one by one.
   window.api.onThumb(({ path, thumb }) => {
@@ -755,12 +840,17 @@ function init() {
   // Live merge progress.
   window.api.onMergeProgress((p) => {
     if (typeof p.percent === 'number') setProgress(p.percent);
+    if (merging) {
+      if (p.phase === 'encoding' && p.clip) setStatus(`Encoding clip ${p.clip} of ${p.total}…`);
+      else if (p.phase === 'joining') setStatus('Joining clips losslessly…');
+    }
   });
 
   // Auto-update: listen for status from main, then check the releases page.
   window.api.onUpdateStatus(handleUpdateStatus);
   window.api.checkForUpdate();
   updateOutputDisplay();
+  loadSettingsIntoUi();
 }
 
 // Update just the thumbnail images for a clip (avoids a full re-render flicker).
