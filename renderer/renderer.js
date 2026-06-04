@@ -21,6 +21,7 @@ let outputPath = null; // user-chosen save location (null = ask at merge time)
 let lastStatusText = '';
 let settings = { resolution: 'auto', fps: 'auto', encoder: 'auto', codec: 'hevc', quality: 'near' };
 let encoderInfo = { h264_nvenc: false, hevc_nvenc: false };
+let mergeStartTime = 0;
 
 const el = {};
 const $ = (id) => document.getElementById(id);
@@ -515,6 +516,7 @@ async function startMerge() {
   lastOutput = out;
 
   merging = true;
+  mergeStartTime = Date.now();
   resetMergeUi();
   el.progressWrap.hidden = false;
   el.cancelBtn.hidden = false;
@@ -538,7 +540,8 @@ async function startMerge() {
       height: c.height,
       fps: c.fps,
       vcodec: c.vcodec,
-      compatKey: c.compatKey
+      compatKey: c.compatKey,
+      name: c.name
     }))
   };
 
@@ -588,6 +591,45 @@ async function copyStatus() {
     el.copyStatusBtn.textContent = '✓ Copied';
     setTimeout(() => { el.copyStatusBtn.textContent = original; }, 1200);
   } catch (_) { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------
+// Merge progress display
+// ---------------------------------------------------------------------------
+function fmtClock(ms) {
+  try { return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+  catch (_) { return ''; }
+}
+
+function fmtRemaining(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+function mergeProgressText(p) {
+  let action;
+  if (p.phase === 'joining') {
+    action = 'Joining clips losslessly (stream copy)…';
+  } else if (p.action === 'copy') {
+    action = `Keeping clip ${p.clip}/${p.total} lossless (no re-encode): ${p.clipName || ''}`;
+  } else {
+    const eng = p.encoder === 'gpu' ? 'GPU / NVENC' : 'CPU';
+    action = `Encoding clip ${p.clip}/${p.total} on ${eng} (${(p.codec || '').toUpperCase()}): ${p.clipName || ''}`;
+  }
+
+  const stats = [`${Math.round(p.percent || 0)}% overall`];
+  if (p.speed > 0) stats.push(`${p.speed.toFixed(1)}× speed`);
+  if (p.fps > 0) stats.push(`${Math.round(p.fps)} fps`);
+  if (mergeStartTime && p.percent > 1.5) {
+    const elapsed = Date.now() - mergeStartTime;
+    const remaining = elapsed * (100 - p.percent) / p.percent;
+    stats.push(`~${fmtRemaining(remaining)} left`);
+    stats.push(`finishes ~${fmtClock(Date.now() + remaining)}`);
+  }
+  return action + '\n' + stats.join('  ·  ');
 }
 
 // ---------------------------------------------------------------------------
@@ -840,10 +882,11 @@ function init() {
   // Live merge progress.
   window.api.onMergeProgress((p) => {
     if (typeof p.percent === 'number') setProgress(p.percent);
-    if (merging) {
-      if (p.phase === 'encoding' && p.clip) setStatus(`Encoding clip ${p.clip} of ${p.total}…`);
-      else if (p.phase === 'joining') setStatus('Joining clips losslessly…');
-    }
+    if (!merging) return;
+    el.statusMsg.textContent = mergeProgressText(p);
+    el.statusMsg.className = 'status-msg';
+    el.copyStatusBtn.hidden = true;
+    lastStatusText = el.statusMsg.textContent;
   });
 
   // Auto-update: listen for status from main, then check the releases page.

@@ -198,15 +198,27 @@ function runFfmpeg(args, totalDuration, onProgress) {
 
     let stdoutBuf = '';
     let errTail = '';
+    let cur = {};
 
     proc.stdout.on('data', (d) => {
       stdoutBuf += d.toString();
       const lines = stdoutBuf.split(/\r?\n/);
       stdoutBuf = lines.pop(); // keep the trailing partial line
       for (const line of lines) {
-        const seconds = parseProgressTime(line);
-        if (seconds != null) {
-          onProgress({ percent: computePercent(seconds, totalDuration), seconds, totalDuration });
+        const eq = line.indexOf('=');
+        if (eq < 0) continue;
+        const key = line.slice(0, eq);
+        const val = line.slice(eq + 1);
+        if (key === 'out_time') { const s = parseProgressTime(line); if (s != null) cur.seconds = s; }
+        else if (key === 'fps') cur.fps = parseFloat(val) || 0;
+        else if (key === 'speed') cur.speed = parseFloat(val) || 0; // "2.5x" -> 2.5
+        else if (key === 'bitrate') cur.bitrate = val.trim();
+        else if (key === 'progress') {
+          // end of one progress block — emit a snapshot
+          if (cur.seconds != null) {
+            onProgress({ percent: computePercent(cur.seconds, totalDuration), seconds: cur.seconds, fps: cur.fps || 0, speed: cur.speed || 0, bitrate: cur.bitrate || '', totalDuration });
+          }
+          cur = {};
         }
       }
     });
@@ -281,7 +293,15 @@ async function mergeHybrid(clips, outputPath, target, encOpts, codecName, totalD
       const base = done;
       const onSeg = (p) => {
         // Per-clip processing occupies 0..92% of the progress bar.
-        onProgress({ percent: computePercent(base + (p.seconds || 0), totalDuration) * 0.92, phase: 'encoding', clip: i + 1, total: clips.length });
+        onProgress({
+          percent: computePercent(base + (p.seconds || 0), totalDuration) * 0.92,
+          phase: 'encoding', clip: i + 1, total: clips.length,
+          clipName: clip.name || path.basename(String(clip.path || '')),
+          action: copyVideo ? 'copy' : 'encode',
+          encoder: useNvencNow ? 'gpu' : 'cpu',
+          codec: encOpts.codec,
+          fps: p.fps, speed: p.speed
+        });
       };
       try {
         await runFfmpeg(buildSegmentArgs(clip, target, { ...encOpts, useNvenc: useNvencNow }, seg, copyVideo), clip.duration || 0, onSeg);
@@ -302,7 +322,7 @@ async function mergeHybrid(clips, outputPath, target, encOpts, codecName, totalD
     fs.writeFileSync(listFile, concatListContent(segments.map((s) => ({ path: s }))), 'utf8');
     try {
       await runFfmpeg(buildCopyArgs(listFile, outputPath), totalDuration,
-        (p) => onProgress({ percent: 92 + (p.percent || 0) * 0.08, phase: 'joining' }));
+        (p) => onProgress({ percent: 92 + (p.percent || 0) * 0.08, phase: 'joining', fps: p.fps, speed: p.speed }));
     } catch (joinErr) {
       if (canceled) throw joinErr;
       log.warn('Stream-copy join failed; falling back to a full re-encode:', String((joinErr && joinErr.message) || joinErr));
