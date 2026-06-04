@@ -31,6 +31,15 @@
       </div>
     </header>
 
+    <!-- Self-update banner (shown only when an update is available) -->
+    <div id="updateBanner" class="update-banner" hidden>
+      <span id="updateText"></span>
+      <span class="update-actions">
+        <button id="updateActionBtn" class="btn btn-primary btn-small"></button>
+        <button id="updateDismiss" class="btn btn-small">Later</button>
+      </span>
+    </div>
+
     <!-- Main body: clip list + preview -->
     <div class="body">
       <section class="list-pane">
@@ -68,6 +77,7 @@
         <span class="timeline-title">Timeline</span>
         <span id="totalDuration" class="muted"></span>
         <span id="compatBadge" class="badge" hidden></span>
+        <button id="keepCompatBtn" class="btn btn-small" hidden title="Remove the clips whose format differs, so the rest can merge losslessly"></button>
         <span class="spacer"></span>
         <span class="hint">Drag clips to change the merge order</span>
       </div>
@@ -78,22 +88,27 @@
 
     <!-- Footer / action bar -->
     <footer class="footer">
-      <label class="reencode-toggle" title="Re-encode is required when clips have different codecs, resolutions or frame rates.">
-        <input type="checkbox" id="reencodeToggle" disabled />
-        <span id="reencodeLabel">Re-encode (lossless when off)</span>
-      </label>
-
-      <div id="statusMsg" class="status-msg"></div>
-
-      <div id="progressWrap" class="progress-wrap" hidden>
-        <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
-        <span id="progressText" class="progress-text">0%</span>
+      <div class="footer-row">
+        <button id="outputBtn" class="btn" disabled title="Choose where the merged video is saved">📂 Save to…</button>
+        <span id="outputPath" class="output-path" title="">You'll be asked where to save when you click Merge</span>
+        <label class="reencode-toggle" title="Re-encode is required when clips have different codecs, resolutions or frame rates.">
+          <input type="checkbox" id="reencodeToggle" disabled />
+          <span id="reencodeLabel">Re-encode (lossless when off)</span>
+        </label>
       </div>
+      <div class="footer-row">
+        <div id="statusMsg" class="status-msg"></div>
 
-      <div class="footer-buttons">
-        <button id="showBtn" class="btn" hidden>Show in folder</button>
-        <button id="cancelBtn" class="btn btn-danger" hidden>Cancel</button>
-        <button id="mergeBtn" class="btn btn-primary" disabled>Merge ▶</button>
+        <div id="progressWrap" class="progress-wrap" hidden>
+          <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
+          <span id="progressText" class="progress-text">0%</span>
+        </div>
+
+        <div class="footer-buttons">
+          <button id="showBtn" class="btn" hidden>Show in folder</button>
+          <button id="cancelBtn" class="btn btn-danger" hidden>Cancel</button>
+          <button id="mergeBtn" class="btn btn-primary" disabled>Merge ▶</button>
+        </div>
       </div>
     </footer>
   </div>

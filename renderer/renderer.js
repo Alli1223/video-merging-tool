@@ -9,6 +9,7 @@ let selectedId = null;
 let folderPath = null;
 let merging = false;
 let lastOutput = null;
+let outputPath = null; // user-chosen save location (null = ask at merge time)
 
 const el = {};
 const $ = (id) => document.getElementById(id);
@@ -68,6 +69,13 @@ function majorityKey() {
   let best = null, bestN = -1;
   for (const k in counts) if (counts[k] > bestN) { best = k; bestN = counts[k]; }
   return best;
+}
+
+// How many clips differ from the majority format (the re-encode culprits).
+function countMismatched() {
+  if (clips.length < 2) return 0;
+  const major = majorityKey();
+  return clips.filter((c) => c.compatKey !== major).length;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +185,11 @@ function updateSummary() {
     badge.className = 'badge warn';
     badge.textContent = '⚠ Mixed formats — needs re-encode';
   }
+
+  // Offer a one-click way to drop the odd-format clips for a lossless merge.
+  const mismatched = countMismatched();
+  el.keepCompatBtn.hidden = mismatched === 0;
+  if (mismatched > 0) el.keepCompatBtn.textContent = `Drop ${mismatched} mismatched`;
 }
 
 // Enable/disable the re-encode toggle and merge button based on current state.
@@ -200,6 +213,8 @@ function updateMergeControls() {
   el.mergeBtn.disabled = !has || merging;
   el.sortSelect.disabled = !has || merging;
   el.shuffleBtn.disabled = !has || merging;
+  el.outputBtn.disabled = !has || merging;
+  el.keepCompatBtn.disabled = merging;
   el.openBtn.disabled = merging;
 }
 
@@ -359,6 +374,24 @@ function shuffleClips() {
   renderAll();
 }
 
+// Drop the clips whose format differs from the majority so the remaining set
+// can be merged losslessly (no re-encode needed).
+function keepCompatibleOnly() {
+  if (merging || clips.length < 2) return;
+  const major = majorityKey();
+  const removed = clips.filter((c) => c.compatKey !== major);
+  if (!removed.length) return;
+  clips = clips.filter((c) => c.compatKey === major);
+  if (removed.some((c) => c.id === selectedId)) {
+    selectedId = null;
+    el.previewPane.hidden = true;
+    document.querySelector('.body').classList.remove('has-preview');
+    el.previewVideo.removeAttribute('src');
+  }
+  renderAll();
+  setStatus(`Removed ${removed.length} clip(s) of a different format — the rest can merge losslessly.`);
+}
+
 // ---------------------------------------------------------------------------
 // Scanning
 // ---------------------------------------------------------------------------
@@ -371,6 +404,8 @@ async function openFolder() {
 async function scan(dir) {
   folderPath = dir;
   el.folderPath.textContent = dir;
+  outputPath = null;
+  updateOutputDisplay();
   setStatus('');
   resetMergeUi();
 
@@ -419,14 +454,15 @@ async function startMerge() {
   const { lossless } = compatibility();
   const mode = (!lossless || reencode) ? 'reencode' : 'copy';
 
-  // Suggest an output name + extension.
-  const base = (folderPath ? folderPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() : 'merged') || 'merged';
-  const ext = mode === 'copy' ? (clips[0].ext || 'mp4') : 'mp4';
-  const defaultName = `${base}_merged.${ext}`;
-
-  const outputPath = await window.api.saveOutput(defaultName);
-  if (!outputPath) return;
-  lastOutput = outputPath;
+  // Use the location the user already chose, or ask now.
+  let target = outputPath;
+  if (!target) {
+    target = await window.api.saveOutput(suggestedOutputName());
+    if (!target) return;
+    outputPath = target;
+    updateOutputDisplay();
+  }
+  lastOutput = target;
 
   merging = true;
   resetMergeUi();
@@ -441,7 +477,7 @@ async function startMerge() {
   updateMergeControls();
 
   const payload = {
-    outputPath,
+    outputPath: target,
     mode,
     clips: clips.map((c) => ({
       path: c.path,
@@ -491,6 +527,67 @@ function setStatus(msg, kind) {
 }
 
 // ---------------------------------------------------------------------------
+// Output location
+// ---------------------------------------------------------------------------
+function suggestedOutputName() {
+  const base = (folderPath ? folderPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() : 'merged') || 'merged';
+  const { lossless } = compatibility();
+  const ext = (!lossless || el.reencodeToggle.checked) ? 'mp4' : ((clips[0] && clips[0].ext) || 'mp4');
+  return `${base}_merged.${ext}`;
+}
+
+async function chooseOutput() {
+  const picked = await window.api.saveOutput(suggestedOutputName());
+  if (!picked) return;
+  outputPath = picked;
+  updateOutputDisplay();
+}
+
+function updateOutputDisplay() {
+  if (!el.outputPath) return;
+  if (outputPath) {
+    el.outputPath.textContent = outputPath;
+    el.outputPath.title = outputPath;
+    el.outputPath.classList.add('set');
+  } else {
+    el.outputPath.textContent = "You'll be asked where to save when you click Merge";
+    el.outputPath.title = '';
+    el.outputPath.classList.remove('set');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Auto-update banner
+// ---------------------------------------------------------------------------
+function handleUpdateStatus(p) {
+  if (!p) return;
+  const banner = el.updateBanner;
+  if (p.state === 'available') {
+    el.updateText.textContent = `A new version (v${p.version}) is available.`;
+    if (p.canAutoUpdate) {
+      el.updateActionBtn.textContent = '⬇ Download & install';
+      el.updateActionBtn.onclick = () => window.api.downloadUpdate();
+    } else {
+      el.updateActionBtn.textContent = '↗ Open releases page';
+      el.updateActionBtn.onclick = () => window.api.openReleases();
+    }
+    el.updateActionBtn.disabled = false;
+    banner.hidden = false;
+  } else if (p.state === 'progress') {
+    el.updateText.textContent = `Downloading update… ${Math.round(p.percent || 0)}%`;
+    el.updateActionBtn.disabled = true;
+    banner.hidden = false;
+  } else if (p.state === 'downloaded') {
+    el.updateText.textContent = `Update v${p.version} is ready to install.`;
+    el.updateActionBtn.textContent = '↻ Restart & install';
+    el.updateActionBtn.onclick = () => window.api.installUpdate();
+    el.updateActionBtn.disabled = false;
+    banner.hidden = false;
+  }
+  // 'checking' / 'none' / 'error' → leave the banner hidden (silent).
+}
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 function init() {
@@ -520,6 +617,13 @@ function init() {
   el.mergeBtn = $('mergeBtn');
   el.cancelBtn = $('cancelBtn');
   el.showBtn = $('showBtn');
+  el.outputBtn = $('outputBtn');
+  el.outputPath = $('outputPath');
+  el.keepCompatBtn = $('keepCompatBtn');
+  el.updateBanner = $('updateBanner');
+  el.updateText = $('updateText');
+  el.updateActionBtn = $('updateActionBtn');
+  el.updateDismiss = $('updateDismiss');
 
   el.openBtn.addEventListener('click', openFolder);
   el.openBtn2.addEventListener('click', openFolder);
@@ -528,6 +632,9 @@ function init() {
   el.mergeBtn.addEventListener('click', startMerge);
   el.cancelBtn.addEventListener('click', () => window.api.cancelMerge());
   el.showBtn.addEventListener('click', () => { if (lastOutput) window.api.showItemInFolder(lastOutput); });
+  el.outputBtn.addEventListener('click', chooseOutput);
+  el.keepCompatBtn.addEventListener('click', keepCompatibleOnly);
+  el.updateDismiss.addEventListener('click', () => { el.updateBanner.hidden = true; });
 
   // Thumbnails stream in one by one.
   window.api.onThumb(({ path, thumb }) => {
@@ -541,6 +648,11 @@ function init() {
   window.api.onMergeProgress((p) => {
     if (typeof p.percent === 'number') setProgress(p.percent);
   });
+
+  // Auto-update: listen for status from main, then check the releases page.
+  window.api.onUpdateStatus(handleUpdateStatus);
+  window.api.checkForUpdate();
+  updateOutputDisplay();
 }
 
 // Update just the thumbnail images for a clip (avoids a full re-render flicker).
