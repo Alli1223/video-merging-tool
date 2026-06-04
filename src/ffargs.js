@@ -53,7 +53,7 @@ function reencodeTarget(clips) {
 // Re-encode fallback: normalize every clip to the common spec, then concatenate
 // with the concat filter. Clips without audio get a matched silent track from
 // an anullsrc lavfi input so the filter sees a uniform stream layout.
-function buildReencodeArgs(clips, outputPath) {
+function buildReencodeArgs(clips, outputPath, filterScriptPath) {
   const { W, H, F } = reencodeTarget(clips);
   const anyAudio = clips.some((c) => c.hasAudio);
 
@@ -100,14 +100,19 @@ function buildReencodeArgs(clips, outputPath) {
     : `${concatLabels.join('')}concat=n=${n}:v=1:a=0[v]`;
   const filterComplex = filters.join(';') + ';' + concatFilter;
 
-  const args = [...inputArgs, '-filter_complex', filterComplex, '-map', '[v]'];
+  // The filter graph can be huge (one chain per clip). Pass it via a script
+  // file (-filter_complex_script) rather than inline, so the command line stays
+  // short — otherwise many clips overflow the OS command-line limit, which
+  // surfaces as "spawn ENAMETOOLONG". The caller writes filterComplex to
+  // filterScriptPath.
+  const args = [...inputArgs, '-filter_complex_script', filterScriptPath, '-map', '[v]'];
   if (anyAudio) args.push('-map', '[a]');
   args.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p');
   if (anyAudio) args.push('-c:a', 'aac', '-b:a', '192k');
   else args.push('-an');
   if (isMp4Like(outputPath)) args.push('-movflags', '+faststart');
   args.push(outputPath);
-  return args;
+  return { args, filterComplex };
 }
 
 // Parse one line of ffmpeg `-progress` output into elapsed output seconds.

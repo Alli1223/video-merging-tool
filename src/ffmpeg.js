@@ -217,7 +217,16 @@ async function mergeCopy(clips, outputPath, totalDuration, onProgress) {
 }
 
 async function mergeReencode(clips, outputPath, totalDuration, onProgress) {
-  await runFfmpeg(buildReencodeArgs(clips, outputPath), totalDuration, onProgress);
+  // Write the (potentially huge) filter graph to a file so the command line
+  // can't overflow the OS limit with many clips (spawn ENAMETOOLONG).
+  const filterScript = path.join(os.tmpdir(), `vmt-filter-${process.pid}-${Date.now()}.txt`);
+  const { args, filterComplex } = buildReencodeArgs(clips, outputPath, filterScript);
+  fs.writeFileSync(filterScript, filterComplex, 'utf8');
+  try {
+    await runFfmpeg(args, totalDuration, onProgress);
+  } finally {
+    safeUnlink(filterScript);
+  }
   return { success: true, mode: 'reencode', outputPath };
 }
 

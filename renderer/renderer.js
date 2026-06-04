@@ -18,6 +18,7 @@ let folderPath = null;
 let merging = false;
 let lastOutput = null;
 let outputPath = null; // user-chosen save location (null = ask at merge time)
+let lastStatusText = '';
 
 const el = {};
 const $ = (id) => document.getElementById(id);
@@ -539,8 +540,19 @@ function setProgress(pct) {
 }
 
 function setStatus(msg, kind) {
+  lastStatusText = msg || '';
   el.statusMsg.textContent = msg;
   el.statusMsg.className = 'status-msg' + (kind ? ' ' + kind : '');
+  if (el.copyStatusBtn) el.copyStatusBtn.hidden = !msg;
+}
+
+async function copyStatus() {
+  try {
+    await window.api.copyText(lastStatusText);
+    const original = el.copyStatusBtn.textContent;
+    el.copyStatusBtn.textContent = '✓ Copied';
+    setTimeout(() => { el.copyStatusBtn.textContent = original; }, 1200);
+  } catch (_) { /* ignore */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -687,6 +699,7 @@ function init() {
   el.reencodeToggle = $('reencodeToggle');
   el.reencodeLabel = $('reencodeLabel');
   el.statusMsg = $('statusMsg');
+  el.copyStatusBtn = $('copyStatusBtn');
   el.progressWrap = $('progressWrap');
   el.progressBar = $('progressBar');
   el.progressText = $('progressText');
@@ -718,6 +731,7 @@ function init() {
   el.mergeBtn.addEventListener('click', startMerge);
   el.cancelBtn.addEventListener('click', () => window.api.cancelMerge());
   el.showBtn.addEventListener('click', () => { if (lastOutput) window.api.showItemInFolder(lastOutput); });
+  el.copyStatusBtn.addEventListener('click', copyStatus);
   el.outputBtn.addEventListener('click', chooseOutput);
   el.keepCompatBtn.addEventListener('click', keepCompatibleOnly);
   el.updateDismiss.addEventListener('click', () => { el.updateBanner.hidden = true; });

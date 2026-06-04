@@ -403,7 +403,17 @@ select:disabled { opacity: 0.5; }
   cursor: pointer;
 }
 .reencode-toggle input { width: 16px; height: 16px; accent-color: var(--accent); }
-.status-msg { font-size: 13px; flex: 1; min-width: 0; }
+.status-msg {
+  font-size: 13px;
+  flex: 1;
+  min-width: 0;
+  user-select: text;        /* allow highlighting/copying the message (incl. errors) */
+  cursor: text;
+  white-space: pre-wrap;    /* keep newlines in multi-line FFmpeg errors */
+  word-break: break-word;
+  max-height: 72px;
+  overflow-y: auto;
+}
 .status-msg.error { color: var(--red); }
 .status-msg.success { color: var(--green); }
 

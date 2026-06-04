@@ -67,14 +67,15 @@ test('buildReencodeArgs builds an A/V concat graph and injects silent audio', ()
     { path: '/a.mp4', width: 1280, height: 720, fps: 30, hasAudio: true, duration: 5 },
     { path: '/b.mp4', width: 640, height: 480, fps: 30, hasAudio: false, duration: 3 } // no audio
   ];
-  const args = buildReencodeArgs(clips, '/out.mp4');
+  const { args, filterComplex } = buildReencodeArgs(clips, '/out.mp4', '/tmp/f.txt');
   const s = args.join(' ');
 
-  assert.equal(args.filter((x) => x === '-i').length, 3); // 2 real inputs + 1 anullsrc
-  assert.ok(s.includes('anullsrc'));                        // silent track injected
-  assert.ok(s.includes('concat=n=2:v=1:a=1'));              // 2 segments, video + audio
-  assert.ok(s.includes('scale=1280:720'));                  // target = largest dims
-  assert.ok(!s.includes('scale=1920'));
+  assert.equal(args.filter((x) => x === '-i').length, 3);   // 2 real inputs + 1 anullsrc
+  assert.ok(s.includes('anullsrc'));                         // silent track injected (input)
+  assert.ok(s.includes('-filter_complex_script /tmp/f.txt')); // graph via file, not inline
+  assert.ok(filterComplex.includes('concat=n=2:v=1:a=1'));   // 2 segments, video + audio
+  assert.ok(filterComplex.includes('scale=1280:720'));       // target = largest dims
+  assert.ok(!filterComplex.includes('scale=1920'));
   assert.ok(s.includes('libx264'));
   assert.ok(s.includes('-c:a') && s.includes('aac'));
   assert.equal(args[args.length - 1], '/out.mp4');
@@ -85,9 +86,11 @@ test('buildReencodeArgs handles all-audioless clips (no audio track)', () => {
     { path: '/a.mp4', width: 1280, height: 720, fps: 30, hasAudio: false, duration: 5 },
     { path: '/b.mp4', width: 1280, height: 720, fps: 30, hasAudio: false, duration: 3 }
   ];
-  const s = buildReencodeArgs(clips, '/out.mp4').join(' ');
-  assert.ok(s.includes('concat=n=2:v=1:a=0'));
+  const { args, filterComplex } = buildReencodeArgs(clips, '/out.mp4', '/tmp/f.txt');
+  const s = args.join(' ');
+  assert.ok(filterComplex.includes('concat=n=2:v=1:a=0'));
   assert.ok(s.includes('-an'));
+  assert.ok(!filterComplex.includes('anullsrc'));
   assert.ok(!s.includes('anullsrc'));
 });
 
