@@ -5,12 +5,13 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node selftest.js",
+    "test": "node --test \"test/**/*.test.js\"",
+    "test:engine": "node selftest.js",
     "dist": "electron-builder",
-    "dist:win": "electron-builder --win",
-    "dist:linux": "electron-builder --linux"
+    "dist:win": "electron-builder --win --publish never",
+    "dist:linux": "electron-builder --linux --publish never"
   },
-  "author": "",
+  "author": "Alastair Rayner",
   "license": "MIT",
   "engines": {
     "node": ">=18"
@@ -37,14 +38,31 @@
       "**/node_modules/ffmpeg-static/**",
       "**/node_modules/ffprobe-static/**"
     ],
+    "directories": {
+      "output": "dist"
+    },
     "win": {
-      "target": "nsis"
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "Video Merging Tool",
+      "artifactName": "VideoMergingTool-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "VideoMergingTool-Portable-${version}.${ext}"
     },
     "linux": {
       "target": [
         "AppImage"
       ],
-      "category": "AudioVideo"
+      "category": "AudioVideo",
+      "artifactName": "VideoMergingTool-${version}.${ext}"
     }
   }
 }

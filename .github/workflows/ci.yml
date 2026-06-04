@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # allow manual runs from the Actions tab
+
+permissions:
+  contents: write # required to attach build artifacts to a Release on tag
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    # The unit tests only exercise pure modules, so skip the (large) Electron
+    # binary download to keep this gate fast.
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run unit tests
+        run: npm test
+
+  build-windows:
+    name: Build Windows (setup + portable)
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      # Confirm the bundled FFmpeg pipeline actually works on the target OS
+      # before we spend time packaging it.
+      - name: FFmpeg engine smoke test
+        run: npm run test:engine
+
+      # Produces dist/VideoMergingTool-Setup-<ver>.exe (NSIS installer)
+      # and    dist/VideoMergingTool-Portable-<ver>.exe (portable).
+      - name: Build installers
+        run: npm run dist:win
+
+      - name: List build output
+        shell: pwsh
+        run: Get-ChildItem dist -Filter *.exe | Select-Object Name, Length
+
+      - name: Upload installers as workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installers
+          path: dist/*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      # On a version tag (e.g. v1.0.0) publish the exes to a GitHub Release.
+      - name: Publish to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+          fail_on_unmatched_files: true

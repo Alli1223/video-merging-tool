@@ -35,23 +35,54 @@ npm start
 Run `npm install` on each OS you want to use it on — the correct FFmpeg binary
 is fetched for the current platform.
 
-To confirm the FFmpeg pipeline works on a fresh machine (handy on Linux), run
-the headless smoke test — it generates a few clips and exercises both the
-lossless and re-encode merge paths:
+## Tests
 
 ```bash
-npm test
+npm test            # fast unit tests (ordering, compatibility, FFmpeg arg building)
+npm run test:engine # headless end-to-end smoke test of the real FFmpeg pipeline
 ```
+
+`npm test` uses Node's built-in test runner (no extra dependencies) and runs in
+under a second. `npm run test:engine` generates a few clips and exercises both
+the lossless and re-encode merge paths end to end — handy for confirming the
+bundled FFmpeg works after installing on a new OS (e.g. Linux).
 
 ## Build a standalone app
 
 ```bash
 npm run dist          # build for the current OS
-npm run dist:win      # Windows installer (.exe / NSIS)
+npm run dist:win      # Windows: NSIS setup .exe + portable .exe
 npm run dist:linux    # Linux AppImage
 ```
 
-Output lands in `dist/`.
+Output lands in `dist/`:
+
+| File | What it is |
+|------|------------|
+| `VideoMergingTool-Setup-<version>.exe` | NSIS installer (lets you pick the install dir, adds a Start-menu shortcut). |
+| `VideoMergingTool-Portable-<version>.exe` | Self-contained portable build — run it from anywhere, no install. |
+
+> Builds are unsigned, so Windows SmartScreen may show a "Windows protected your
+> PC" prompt the first time — choose **More info → Run anyway**. Add a code-signing
+> certificate to `electron-builder` config to remove it.
+
+## Continuous integration / releases
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push/PR to
+`main`:
+
+1. **Unit tests** on Ubuntu (`npm test`).
+2. **Windows build** — runs the FFmpeg engine smoke test, then builds the NSIS
+   setup and portable `.exe` and uploads them as downloadable workflow artifacts.
+
+To cut a release, push a tag:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The pipeline then attaches both `.exe` files to a GitHub Release for that tag.
 
 ## How to use
 
@@ -79,10 +110,14 @@ therefore not bit-for-bit lossless (though CRF 18 is visually near-lossless).
 |------|------|
 | `main.js` | Electron main process; owns windows and IPC. |
 | `preload.js` | Safe `window.api` bridge to the renderer. |
-| `src/ffmpeg.js` | ffprobe metadata, thumbnails, and both merge paths. |
-| `src/scanner.js` | Directory scan + capture-time ordering. |
+| `src/metadata.js` | Pure logic: file detection, capture-time resolution, compatibility keys, ordering. |
+| `src/ffargs.js` | Pure logic: FFmpeg argument/filter-graph construction and progress parsing. |
+| `src/ffmpeg.js` | Spawns ffprobe/ffmpeg for probing, thumbnails, and both merge paths. |
+| `src/scanner.js` | Directory scan that wires `ffmpeg` + `metadata` together. |
 | `renderer/` | The UI (HTML/CSS/JS): clip list, timeline, merge controls. |
-| `selftest.js` | Headless integration test of the merge engine (`npm test`). |
+| `test/` | Unit tests for the pure modules (`npm test`). |
+| `selftest.js` | End-to-end engine smoke test (`npm run test:engine`). |
+| `.github/workflows/ci.yml` | CI: unit tests + Windows installer build. |
 
 ## Supported containers
 
