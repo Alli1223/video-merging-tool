@@ -21,7 +21,7 @@ let mainWindow = null;
 let lastScanDir = null;
 
 // Persisted output/encoding preferences (userData/settings.json).
-const DEFAULT_SETTINGS = { resolution: 'auto', fps: 'auto', encoder: 'auto', codec: 'h264', quality: 'near' };
+const DEFAULT_SETTINGS = { resolution: 'auto', fps: 'auto', encoder: 'auto', codec: 'hevc', quality: 'near' };
 let settings = { ...DEFAULT_SETTINGS };
 
 function settingsFile() { return path.join(app.getPath('userData'), 'settings.json'); }

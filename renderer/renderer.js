@@ -19,7 +19,7 @@ let merging = false;
 let lastOutput = null;
 let outputPath = null; // user-chosen save location (null = ask at merge time)
 let lastStatusText = '';
-let settings = { resolution: 'auto', fps: 'auto', encoder: 'auto', codec: 'h264', quality: 'near' };
+let settings = { resolution: 'auto', fps: 'auto', encoder: 'auto', codec: 'hevc', quality: 'near' };
 let encoderInfo = { h264_nvenc: false, hevc_nvenc: false };
 
 const el = {};

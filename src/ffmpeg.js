@@ -272,17 +272,28 @@ async function mergeHybrid(clips, outputPath, target, encOpts, codecName, totalD
   const segments = [];
   try {
     let done = 0;
+    let useNvencNow = encOpts.useNvenc;
     for (let i = 0; i < clips.length; i++) {
       if (canceled) { const e = new Error('Merge canceled'); e.canceled = true; throw e; }
       const clip = clips[i];
       const seg = path.join(tmpDir, `seg-${String(i).padStart(4, '0')}.mp4`);
       const copyVideo = !forceReencode && matchesTargetVideo(clip, target, codecName);
-      const args = buildSegmentArgs(clip, target, encOpts, seg, copyVideo);
       const base = done;
-      await runFfmpeg(args, clip.duration || 0, (p) => {
+      const onSeg = (p) => {
         // Per-clip processing occupies 0..92% of the progress bar.
         onProgress({ percent: computePercent(base + (p.seconds || 0), totalDuration) * 0.92, phase: 'encoding', clip: i + 1, total: clips.length });
-      });
+      };
+      try {
+        await runFfmpeg(buildSegmentArgs(clip, target, { ...encOpts, useNvenc: useNvencNow }, seg, copyVideo), clip.duration || 0, onSeg);
+      } catch (e) {
+        if (canceled || copyVideo || !useNvencNow) throw e;
+        // GPU encode failed (e.g. resolution/codec the GPU can't do) — drop to
+        // CPU for this clip and the rest of the merge.
+        log.warn(`GPU encode failed for clip ${i + 1}; retrying this and the remaining clips on CPU:`, String((e && e.message) || e));
+        useNvencNow = false;
+        safeUnlink(seg);
+        await runFfmpeg(buildSegmentArgs(clip, target, { ...encOpts, useNvenc: false }, seg, false), clip.duration || 0, onSeg);
+      }
       done += clip.duration || 0;
       segments.push(seg);
     }
@@ -321,8 +332,15 @@ async function merge(opts, onProgress) {
   const enc = await detectEncoders();
   const nvencForCodec = codec === 'hevc' ? enc.hevc_nvenc : enc.h264_nvenc;
   const wanted = settings.encoder || 'auto';
-  const useNvenc = wanted === 'cpu' ? false : nvencForCodec;
+  let useNvenc = wanted === 'cpu' ? false : nvencForCodec;
   if (wanted === 'nvenc' && !nvencForCodec) log.warn('NVENC requested but unavailable for', codec, '- using CPU.');
+  // NVENC has a max resolution (~4096px for H.264, ~8192px for HEVC). Above that
+  // the GPU encoder can't open ("Width NNNN exceeds 4096"), so use the CPU.
+  const nvencMax = codec === 'hevc' ? 8192 : 4096;
+  if (useNvenc && (target.W > nvencMax || target.H > nvencMax)) {
+    log.warn(`Target ${target.W}x${target.H} exceeds ${codec} NVENC limit (${nvencMax}px); using CPU.`);
+    useNvenc = false;
+  }
   const encOpts = { codec, useNvenc, quality };
   log.info('Merge:', { clips: clips.length, target, codec, quality, encoder: wanted, useNvenc });
 
