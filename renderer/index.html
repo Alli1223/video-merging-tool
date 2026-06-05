@@ -98,6 +98,15 @@
           <span id="reencodeLabel">Force re-encode every clip</span>
         </label>
       </div>
+      <div class="footer-row music-row">
+        <label class="music-toggle" title="Fill the whole video with smoothly-blended, public-domain (CC0) chill music — fetched free from the Internet Archive and looped to cover your footage.">
+          <input type="checkbox" id="musicToggle" disabled />
+          <span>🎵 Add chill background music</span>
+        </label>
+        <select id="musicVibe" class="music-vibe" disabled title="Choose the vibe of the background music"></select>
+        <span id="musicStatus" class="muted music-status"></span>
+        <button id="musicCreditsBtn" class="btn btn-small" hidden title="Show the tracks used and their licence">ⓘ Credits</button>
+      </div>
       <div class="footer-row">
         <div id="statusMsg" class="status-msg"></div>
         <button id="copyStatusBtn" class="btn btn-small" hidden title="Copy this message to the clipboard">⧉ Copy</button>
@@ -174,6 +183,46 @@
           </div>
           <div class="settings-row">
             <span class="muted setting-note">Clips already at the target are kept lossless; only the others are re-encoded to it.</span>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h3>Background music</h3>
+          <div class="settings-row">
+            <span class="muted setting-note" id="musicSourceNote">Public-domain (CC0) lo-fi &amp; chill music, fetched free from the Internet Archive — free to use in any project, no attribution required. Tracks are looped and crossfaded to fill the whole video. The footage itself is never re-encoded just to add music.</span>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="setMusicCrossfade">Crossfade between tracks</label>
+            <select id="setMusicCrossfade">
+              <option value="0">None (hard cut)</option>
+              <option value="2">2 seconds</option>
+              <option value="4">4 seconds</option>
+              <option value="6">6 seconds</option>
+              <option value="8">8 seconds</option>
+            </select>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="setMusicFadeOut">Fade out at end</label>
+            <select id="setMusicFadeOut">
+              <option value="0">None</option>
+              <option value="3">3 seconds</option>
+              <option value="5">5 seconds</option>
+              <option value="8">8 seconds</option>
+            </select>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="setMusicVolume">Music volume</label>
+            <select id="setMusicVolume">
+              <option value="100">100%</option>
+              <option value="80">80%</option>
+              <option value="60">60%</option>
+              <option value="40">40%</option>
+            </select>
+          </div>
+          <div class="settings-row">
+            <span id="musicCacheText" class="muted">No music downloaded yet.</span>
+            <button id="clearMusicBtn" class="btn btn-small">Clear downloaded music</button>
+            <button id="browseMusicBtn" class="btn btn-small">Browse source ↗</button>
           </div>
         </section>
 

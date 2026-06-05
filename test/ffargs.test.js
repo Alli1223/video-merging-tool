@@ -5,7 +5,9 @@ const assert = require('node:assert/strict');
 const {
   parseFps, concatPath, concatListContent, isMp4Like,
   buildCopyArgs, reencodeTarget, buildReencodeArgs, parseProgressTime, computePercent,
-  resolveTarget, buildVideoEncodeArgs, buildSegmentArgs
+  resolveTarget, buildVideoEncodeArgs, buildSegmentArgs,
+  planMusic, buildLoopUnitArgs, buildMusicMuxArgs,
+  estimatedVideoBitrate, estimateMergeBytes
 } = require('../src/ffargs');
 
 test('parseFps handles fractions and edge cases', () => {
@@ -150,4 +152,166 @@ test('buildSegmentArgs adds a silent track for clips without audio', () => {
     { codec: 'h264', useNvenc: false, quality: 'near' }, '/seg.mp4', false).join(' ');
   assert.ok(s.includes('anullsrc'));
   assert.ok(s.includes('-map 1:a:0'));
+});
+
+// ---------------------------------------------------------------------------
+// Background music
+// ---------------------------------------------------------------------------
+
+test('planMusic clamps fades to half the video and bounds volume', () => {
+  // Long video: requested values pass through.
+  assert.deepEqual(planMusic(600, { crossfade: 4, fadeIn: 2, fadeOut: 5, volume: 1 }),
+    { crossfade: 4, fadeIn: 2, fadeOut: 5, volume: 1 });
+  // Tiny video: fades can't exceed half its length.
+  const p = planMusic(6, { fadeIn: 2, fadeOut: 5 });
+  assert.equal(p.fadeIn, 2);
+  assert.equal(p.fadeOut, 3); // 5 clamped to 6/2
+  // Volume is bounded to a sane range; crossfade capped at 12.
+  assert.equal(planMusic(600, { volume: 99 }).volume, 4);
+  assert.equal(planMusic(600, { volume: 0 }).volume, 0.05);
+  assert.equal(planMusic(600, { crossfade: 999 }).crossfade, 12);
+  // Defaults when nothing is provided.
+  assert.deepEqual(planMusic(600, {}), { crossfade: 4, fadeIn: 2, fadeOut: 5, volume: 1 });
+});
+
+test('buildLoopUnitArgs crossfade-chains a pool into one [mix] output', () => {
+  const tracks = [
+    { path: '/m1.mp3', duration: 120 },
+    { path: '/m2.mp3', duration: 90 },
+    { path: '/m3.mp3', duration: 150 }
+  ];
+  const { args, filterComplex, crossfade } = buildLoopUnitArgs(tracks, '/tmp/f.txt', '/out/loop.m4a', { crossfade: 4 });
+  const s = args.join(' ');
+  assert.equal(args.filter((x) => x === '-i').length, 3);        // one input per track
+  assert.ok(s.includes('-filter_complex_script /tmp/f.txt'));     // graph via file
+  assert.ok(s.includes('-map [mix]'));
+  assert.ok(s.includes('-c:a aac'));
+  assert.equal(args[args.length - 1], '/out/loop.m4a');
+  assert.equal(crossfade, 4);
+  // Two joins for three tracks, ending in the [mix] label.
+  assert.equal((filterComplex.match(/acrossfade=/g) || []).length, 2);
+  assert.ok(filterComplex.includes('[mix]'));
+  assert.ok(filterComplex.includes('acrossfade=d=4:c1=tri:c2=tri'));
+});
+
+test('buildLoopUnitArgs caps crossfade at half the shortest track', () => {
+  const tracks = [{ path: '/a.mp3', duration: 8 }, { path: '/b.mp3', duration: 200 }];
+  const { filterComplex, crossfade } = buildLoopUnitArgs(tracks, '/f.txt', '/o.m4a', { crossfade: 8 });
+  assert.equal(crossfade, 4); // 8s shortest -> max 4s overlap
+  assert.ok(filterComplex.includes('acrossfade=d=4:'));
+});
+
+test('buildLoopUnitArgs handles a single track (no crossfade) and crossfade=0 (concat)', () => {
+  const one = buildLoopUnitArgs([{ path: '/solo.mp3', duration: 60 }], '/f.txt', '/o.m4a', { crossfade: 4 });
+  assert.equal(one.args.filter((x) => x === '-i').length, 1);
+  assert.ok(!one.filterComplex.includes('acrossfade'));
+  assert.ok(one.filterComplex.includes('[mix]'));
+
+  const concat = buildLoopUnitArgs(
+    [{ path: '/a.mp3', duration: 60 }, { path: '/b.mp3', duration: 60 }], '/f.txt', '/o.m4a', { crossfade: 0 });
+  assert.ok(!concat.filterComplex.includes('acrossfade'));
+  assert.ok(concat.filterComplex.includes('concat=n=2:v=0:a=1[mix]'));
+});
+
+test('buildMusicMuxArgs stream-loops music under a copied video with fades + trim', () => {
+  const args = buildMusicMuxArgs('/in.mp4', '/loop.m4a', '/out.mp4', 3600,
+    { fadeIn: 2, fadeOut: 5, volume: 0.8 });
+  const s = args.join(' ');
+  assert.ok(s.includes('-stream_loop -1 -i /loop.m4a'));
+  assert.ok(s.includes('-map 0:v:0 -map 1:a:0'));
+  assert.ok(s.includes('-c:v copy'));               // video never re-encoded
+  assert.ok(s.includes('volume=0.8'));
+  assert.ok(s.includes('afade=t=in:st=0:d=2'));
+  assert.ok(s.includes('afade=t=out:st=3595:d=5')); // 3600 - 5
+  assert.ok(s.includes('-t 3600'));                 // trimmed to video length
+  assert.ok(s.includes('-movflags +faststart'));
+  assert.equal(args[args.length - 1], '/out.mp4');
+});
+
+test('buildMusicMuxArgs omits volume at 1.0 and faststart for non-mp4', () => {
+  const a = buildMusicMuxArgs('/in.mkv', '/loop.m4a', '/out.mkv', 100, { fadeIn: 0, fadeOut: 0, volume: 1 });
+  const s = a.join(' ');
+  assert.ok(!s.includes('volume='));   // unity gain -> no volume filter
+  assert.ok(!s.includes('afade'));      // no fades requested
+  assert.ok(!s.includes('faststart'));  // mkv
+  assert.ok(s.includes('-c:v copy'));
+  assert.ok(s.includes('-t 100'));
+});
+
+// ---------------------------------------------------------------------------
+// Output size estimation
+// ---------------------------------------------------------------------------
+
+test('estimateMergeBytes: pure lossless copy sums input sizes (exact)', () => {
+  const clips = [
+    { width: 1920, height: 1080, fps: 30, vcodec: 'h264', compatKey: 'k1', duration: 10, size: 1_000_000 },
+    { width: 1920, height: 1080, fps: 30, vcodec: 'h264', compatKey: 'k1', duration: 20, size: 2_000_000 }
+  ];
+  const r = estimateMergeBytes(clips, { codec: 'h264', quality: 'near' }, {});
+  assert.equal(r.pureCopy, true);
+  assert.equal(r.exact, true);
+  assert.equal(r.bytes, 3_000_000);
+  assert.equal(r.peakBytes, 3_000_000); // copy writes the output once
+});
+
+test('estimateMergeBytes: mixed formats keep matching clips but double peak', () => {
+  // Same spec but different compatKeys -> not a pure copy (hybrid path). Both
+  // clips still match the target, so they are kept at their original size, but
+  // the per-clip segments make peak disk ~2x.
+  const clips = [
+    { width: 1920, height: 1080, fps: 30, vcodec: 'h264', compatKey: 'k1', duration: 10, size: 1_000_000 },
+    { width: 1920, height: 1080, fps: 30, vcodec: 'h264', compatKey: 'k2', duration: 20, size: 2_000_000 }
+  ];
+  const r = estimateMergeBytes(clips, { codec: 'h264', quality: 'near' }, {});
+  assert.equal(r.pureCopy, false);
+  assert.equal(r.exact, false);
+  assert.equal(r.bytes, 3_000_000);
+  assert.equal(r.peakBytes, 6_000_000);
+});
+
+test('estimateMergeBytes: a non-matching clip is sized by the bitrate model', () => {
+  const clips = [
+    { width: 1920, height: 1080, fps: 30, vcodec: 'h264', compatKey: 'k1', duration: 10, size: 5_000_000 }, // kept
+    { width: 1280, height: 720, fps: 30, vcodec: 'h264', compatKey: 'k2', duration: 10, size: 1_000_000 }   // re-encoded to 1080p
+  ];
+  const r = estimateMergeBytes(clips, { codec: 'h264', quality: 'near' }, {});
+  const br = estimatedVideoBitrate(1920, 1080, 30, 'h264', 'near');
+  const expected = Math.round(5_000_000 + (br / 8) * 10);
+  assert.equal(r.bytes, expected);
+  assert.ok(r.bytes > 5_000_000);
+  assert.equal(r.exact, false);
+});
+
+test('estimateMergeBytes: forceReencode sizes every clip by the model', () => {
+  const clips = [
+    { width: 1920, height: 1080, fps: 30, vcodec: 'h264', compatKey: 'k1', duration: 10, size: 9_000_000 },
+    { width: 1920, height: 1080, fps: 30, vcodec: 'h264', compatKey: 'k1', duration: 20, size: 9_000_000 }
+  ];
+  const r = estimateMergeBytes(clips, { codec: 'h264', quality: 'near' }, { forceReencode: true });
+  const br = estimatedVideoBitrate(1920, 1080, 30, 'h264', 'near');
+  assert.equal(r.pureCopy, false);
+  assert.equal(r.bytes, Math.round((br / 8) * 10 + (br / 8) * 20)); // original sizes ignored
+});
+
+test('estimateMergeBytes: background music adds an audio track and disables exact', () => {
+  const clips = [
+    { width: 1920, height: 1080, fps: 30, vcodec: 'h264', compatKey: 'k1', duration: 10, size: 1_000_000 },
+    { width: 1920, height: 1080, fps: 30, vcodec: 'h264', compatKey: 'k1', duration: 20, size: 2_000_000 }
+  ];
+  const r = estimateMergeBytes(clips, { codec: 'h264', quality: 'near' }, { music: true });
+  assert.equal(r.exact, false); // music means an extra encode pass
+  assert.equal(r.bytes, Math.round(3_000_000 + (320000 / 8) * 30)); // + AAC across 30s
+});
+
+test('estimateMergeBytes: empty input is zero', () => {
+  assert.deepEqual(estimateMergeBytes([], {}, {}), { bytes: 0, peakBytes: 0, exact: false, pureCopy: false });
+});
+
+test('estimatedVideoBitrate scales with resolution and is lower for HEVC', () => {
+  const h264 = estimatedVideoBitrate(1920, 1080, 30, 'h264', 'near');
+  const hevc = estimatedVideoBitrate(1920, 1080, 30, 'hevc', 'near');
+  const h264_4k = estimatedVideoBitrate(3840, 2160, 30, 'h264', 'near');
+  assert.ok(hevc < h264);          // HEVC is more efficient
+  assert.ok(h264_4k > h264);       // 4K needs more than 1080p
+  assert.ok(h264 > 0);
 });

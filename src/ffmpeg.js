@@ -6,7 +6,8 @@ const ffmpegStatic = require('ffmpeg-static');
 const ffprobeStatic = require('ffprobe-static');
 const {
   parseFps, concatListContent, buildCopyArgs, buildReencodeArgs,
-  resolveTarget, buildSegmentArgs, parseProgressTime, computePercent
+  resolveTarget, buildSegmentArgs, parseProgressTime, computePercent,
+  planMusic, buildLoopUnitArgs, buildMusicMuxArgs
 } = require('./ffargs');
 const log = require('./logger');
 
@@ -345,6 +346,67 @@ async function mergeHybrid(clips, outputPath, target, encOpts, codecName, totalD
   }
 }
 
+// ---------------------------------------------------------------------------
+// Background music
+// ---------------------------------------------------------------------------
+
+// Probe each music track for its duration (needed to size crossfades).
+async function probeMusicDurations(paths) {
+  const out = [];
+  for (const p of paths) {
+    let duration = 0;
+    try { duration = (await probeFile(p)).duration || 0; }
+    catch (e) { log.warn('Could not probe music track', p, '-', String((e && e.message) || e)); }
+    out.push({ path: p, duration });
+  }
+  return out;
+}
+
+// Add a looping, crossfaded background-music bed to an already-merged (silent)
+// video. Two ffmpeg passes: (1) crossfade the track pool into one seamless
+// "loop unit"; (2) stream-loop that unit under the whole video with fades,
+// stream-copying the video so the footage is never re-encoded.
+async function addBackgroundMusic(params, onProgress) {
+  const { videoPath, trackPaths, outputPath, totalDuration } = params;
+  assertBinaries();
+  const tracks = (await probeMusicDurations(trackPaths)).filter((t) => fs.existsSync(t.path));
+  if (!tracks.length) throw new Error('No usable music tracks were provided.');
+  const plan = planMusic(totalDuration, params.options);
+
+  // Work next to the output (same drive) so the final mux is a fast same-volume
+  // operation and we don't fill the system drive.
+  let tmpDir;
+  try { tmpDir = fs.mkdtempSync(path.join(path.dirname(outputPath), 'vmt-music-')); }
+  catch (_) { tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vmt-music-')); }
+  const loopUnit = path.join(tmpDir, 'loopunit.m4a');
+  const filterScript = path.join(tmpDir, 'music-filter.txt');
+  log.info('Background music:', { tracks: tracks.length, plan, tmpDir });
+
+  try {
+    // Pass 1 — build the crossfaded loop unit.
+    const { args: luArgs, filterComplex, crossfade } = buildLoopUnitArgs(tracks, filterScript, loopUnit, { crossfade: plan.crossfade });
+    const loopDur = Math.max(0, tracks.reduce((s, t) => s + (t.duration || 0), 0) - Math.max(0, tracks.length - 1) * crossfade);
+    fs.writeFileSync(filterScript, filterComplex, 'utf8');
+    await runFfmpeg(luArgs, loopDur, (p) =>
+      onProgress({ percent: p.percent || 0, phase: 'music-prep', fps: p.fps, speed: p.speed }));
+
+    if (canceled) { const e = new Error('Merge canceled'); e.canceled = true; throw e; }
+
+    // Pass 2 — loop the unit under the video, with fades, trimmed to length.
+    await runFfmpeg(buildMusicMuxArgs(videoPath, loopUnit, outputPath, totalDuration, plan), totalDuration, (p) =>
+      onProgress({ percent: p.percent || 0, phase: 'music', fps: p.fps, speed: p.speed }));
+    return { success: true, outputPath };
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) { /* ignore */ }
+  }
+}
+
+// A temp path next to the final output for the pre-music (silent) video.
+function siblingTempVideo(outputPath) {
+  const ext = path.extname(outputPath) || '.mp4';
+  return path.join(path.dirname(outputPath), `.vmt-nomusic-${process.pid}-${Date.now()}${ext}`);
+}
+
 // Entry point used by the IPC handler.
 async function merge(opts, onProgress) {
   assertBinaries();
@@ -377,15 +439,47 @@ async function merge(opts, onProgress) {
 
   const totalDuration = clips.reduce((sum, c) => sum + (c.duration || 0), 0);
 
+  // Optional background music. When requested, the clips are merged to a temp
+  // (silent) video first, then a music bed is added in a video-copy pass. The
+  // video merge fills 0..90% of the progress bar and the music pass 90..100%.
+  const music = opts.music && Array.isArray(opts.music.trackPaths) && opts.music.trackPaths.length ? opts.music : null;
+  const videoTarget = music ? siblingTempVideo(outputPath) : outputPath;
+  const videoProgress = music ? (p) => onProgress({ ...p, percent: (p.percent || 0) * 0.9 }) : onProgress;
+
   try {
     const allMatch = clips.every((c) => matchesTargetVideo(c, target, codec));
     const allCompat = new Set(clips.map((c) => c.compatKey)).size === 1;
+    let result;
     if (!forceReencode && allMatch && allCompat) {
-      return await mergeCopy(clips, outputPath, totalDuration, onProgress);
+      result = await mergeCopy(clips, videoTarget, totalDuration, videoProgress);
+    } else {
+      result = await mergeHybrid(clips, videoTarget, target, encOpts, codec, totalDuration, videoProgress, forceReencode);
     }
-    return await mergeHybrid(clips, outputPath, target, encOpts, codec, totalDuration, onProgress, forceReencode);
+
+    if (music) {
+      try {
+        await addBackgroundMusic({
+          videoPath: videoTarget, trackPaths: music.trackPaths, outputPath,
+          totalDuration, options: music.options || {}
+        }, (p) => onProgress({ ...p, percent: 90 + (p.percent || 0) * 0.1 }));
+        safeUnlink(videoTarget);
+        result = { ...result, outputPath, music: true };
+      } catch (musicErr) {
+        if (musicErr && musicErr.canceled) throw musicErr;
+        // Don't waste a long video encode if only the music step failed —
+        // keep the merged (silent) video as the output. videoTarget is a
+        // sibling of outputPath, so this rename is a fast same-volume move.
+        log.error('Adding background music failed; saving the merged video without music:', (musicErr && musicErr.stack) || String(musicErr));
+        safeUnlink(outputPath);
+        try { fs.renameSync(videoTarget, outputPath); }
+        catch (_) { try { fs.copyFileSync(videoTarget, outputPath); safeUnlink(videoTarget); } catch (__) { /* ignore */ } }
+        result = { ...result, outputPath, music: false, musicFailed: true };
+      }
+    }
+    return result;
   } catch (err) {
     safeUnlink(outputPath); // remove the half-written output
+    if (music) safeUnlink(videoTarget); // and the pre-music temp video
     if (err && err.canceled) return { success: false, canceled: true };
     throw err;
   }
@@ -398,4 +492,4 @@ function cancel() {
   }
 }
 
-module.exports = { probeFile, generateThumbnails, merge, cancel, binaryInfo, detectEncoders };
+module.exports = { probeFile, generateThumbnails, merge, addBackgroundMusic, cancel, binaryInfo, detectEncoders };

@@ -6,6 +6,8 @@ const https = require('https');
 const { autoUpdater } = require('electron-updater');
 const { scanDirectory } = require('./src/scanner');
 const ffmpeg = require('./src/ffmpeg');
+const music = require('./src/music');
+const { estimateMergeBytes } = require('./src/ffargs');
 const log = require('./src/logger');
 
 const GH_OWNER = 'Alli1223';
@@ -21,10 +23,15 @@ let mainWindow = null;
 let lastScanDir = null;
 
 // Persisted output/encoding preferences (userData/settings.json).
-const DEFAULT_SETTINGS = { resolution: 'auto', fps: 'auto', encoder: 'auto', codec: 'hevc', quality: 'near' };
+const DEFAULT_SETTINGS = {
+  resolution: 'auto', fps: 'auto', encoder: 'auto', codec: 'hevc', quality: 'near',
+  // Background music tuning (the selection of tracks is per-session, not saved).
+  musicVibe: 'mix', musicCrossfade: 4, musicFadeOut: 5, musicVolume: 100
+};
 let settings = { ...DEFAULT_SETTINGS };
 
 function settingsFile() { return path.join(app.getPath('userData'), 'settings.json'); }
+function musicCacheDir() { return path.join(app.getPath('userData'), 'music-cache'); }
 function loadSettings() {
   try { settings = { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(settingsFile(), 'utf8')) }; }
   catch (_) { settings = { ...DEFAULT_SETTINGS }; }
@@ -166,6 +173,80 @@ ipcMain.handle('merge:cancel', async () => {
   ffmpeg.cancel();
   return true;
 });
+
+// ---------------------------------------------------------------------------
+// Size estimate + free-space check
+// ---------------------------------------------------------------------------
+
+// Estimate the merged output size for the given clips. The renderer passes its
+// own settings + flags so the estimate matches exactly what it will produce.
+ipcMain.handle('estimate:size', (_e, payload) => {
+  payload = payload || {};
+  try {
+    return estimateMergeBytes(payload.clips || [], payload.settings || settings, payload.opts || {});
+  } catch (e) {
+    log.warn('estimate:size failed:', String((e && e.message) || e));
+    return { bytes: 0, peakBytes: 0, exact: false };
+  }
+});
+
+// Free space on the volume that holds targetPath (its parent directory).
+ipcMain.handle('disk:freeSpace', async (_e, targetPath) => {
+  try {
+    const dir = path.dirname(targetPath || lastScanDir || app.getPath('documents'));
+    const st = await fs.promises.statfs(dir);
+    const freeBytes = (st.bavail != null ? st.bavail : st.bfree) * st.bsize;
+    return { freeBytes, mount: path.parse(dir).root || dir };
+  } catch (e) {
+    log.warn('disk:freeSpace failed:', String((e && e.message) || e));
+    return { freeBytes: 0, mount: null };
+  }
+});
+
+// Native confirm dialog (used for the "not enough space" warning). Returns true
+// if the user chose the confirm (first) button.
+ipcMain.handle('dialog:confirm', async (_e, o) => {
+  o = o || {};
+  const res = await dialog.showMessageBox(mainWindow, {
+    type: o.type || 'warning',
+    buttons: [o.confirmText || 'OK', o.cancelText || 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    title: o.title || 'Confirm',
+    message: o.message || '',
+    detail: o.detail || ''
+  });
+  return res.response === 0;
+});
+
+// ---------------------------------------------------------------------------
+// Background music (fetched on demand from the Internet Archive, cached locally)
+// ---------------------------------------------------------------------------
+ipcMain.handle('music:sources', () => music.sourceInfo());
+ipcMain.handle('music:vibes', () => music.listVibes());
+
+ipcMain.handle('music:fetch', async (_e, opts) => {
+  log.info('music:fetch requested', opts || {});
+  try {
+    const res = await music.fetchTracks({
+      cacheDir: musicCacheDir(),
+      vibe: (opts && opts.vibe) || 'mix',
+      poolSize: (opts && opts.poolSize) || 8,
+      onProgress: (p) => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('music:progress', p);
+      }
+    });
+    log.info('music:fetch ready —', res.trackPaths.length, 'track(s),', res.credits.length, 'source(s)');
+    return res;
+  } catch (e) {
+    log.error('music:fetch failed:', (e && e.stack) || String(e));
+    throw e;
+  }
+});
+
+ipcMain.handle('music:cacheInfo', () => music.cacheInfo(musicCacheDir()));
+ipcMain.handle('music:clearCache', () => music.clearCache(musicCacheDir()));
+ipcMain.handle('music:openSource', async () => { await shell.openExternal(music.sourceInfo().browseUrl); return true; });
 
 ipcMain.handle('shell:showItem', async (_e, p) => {
   shell.showItemInFolder(p);
