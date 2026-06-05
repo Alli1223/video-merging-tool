@@ -403,6 +403,35 @@ select:disabled { opacity: 0.5; }
   cursor: pointer;
 }
 .reencode-toggle input { width: 16px; height: 16px; accent-color: var(--accent); }
+.music-row { margin-top: 8px; }
+.music-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.music-toggle input { width: 16px; height: 16px; accent-color: var(--accent); }
+.music-vibe {
+  font-size: 12px;
+  padding: 4px 6px;
+  background: var(--bg-3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.music-vibe:disabled { opacity: 0.5; cursor: not-allowed; }
+.music-status {
+  font-size: 12px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .status-msg {
   font-size: 13px;
   flex: 1;

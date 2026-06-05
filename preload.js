@@ -22,6 +22,11 @@ contextBridge.exposeInMainWorld('api', {
   // Native save dialog for the merged output file.
   saveOutput: (defaultName) => ipcRenderer.invoke('dialog:saveOutput', defaultName),
 
+  // Estimate the merged output size, and check free space on the destination.
+  estimateSize: (payload) => ipcRenderer.invoke('estimate:size', payload),
+  getFreeSpace: (targetPath) => ipcRenderer.invoke('disk:freeSpace', targetPath),
+  confirmDialog: (opts) => ipcRenderer.invoke('dialog:confirm', opts),
+
   // Start a merge. Progress streams back via onMergeProgress.
   startMerge: (opts) => ipcRenderer.invoke('merge:start', opts),
   onMergeProgress: (cb) => {
@@ -30,6 +35,20 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('merge:progress', handler);
   },
   cancelMerge: () => ipcRenderer.invoke('merge:cancel'),
+
+  // Background music: fetch (and cache) royalty-free tracks, with download
+  // progress streaming back via onMusicProgress.
+  getMusicSources: () => ipcRenderer.invoke('music:sources'),
+  getMusicVibes: () => ipcRenderer.invoke('music:vibes'),
+  fetchMusic: (opts) => ipcRenderer.invoke('music:fetch', opts),
+  onMusicProgress: (cb) => {
+    const handler = (_e, data) => cb(data);
+    ipcRenderer.on('music:progress', handler);
+    return () => ipcRenderer.removeListener('music:progress', handler);
+  },
+  getMusicCacheInfo: () => ipcRenderer.invoke('music:cacheInfo'),
+  clearMusicCache: () => ipcRenderer.invoke('music:clearCache'),
+  openMusicSource: () => ipcRenderer.invoke('music:openSource'),
 
   // Reveal a file in the OS file manager.
   showItemInFolder: (p) => ipcRenderer.invoke('shell:showItem', p),

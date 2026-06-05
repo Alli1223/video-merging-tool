@@ -19,9 +19,15 @@ let merging = false;
 let lastOutput = null;
 let outputPath = null; // user-chosen save location (null = ask at merge time)
 let lastStatusText = '';
-let settings = { resolution: 'auto', fps: 'auto', encoder: 'auto', codec: 'hevc', quality: 'near' };
+let settings = { resolution: 'auto', fps: 'auto', encoder: 'auto', codec: 'hevc', quality: 'near', musicCrossfade: 4, musicFadeOut: 5, musicVolume: 100 };
 let encoderInfo = { h264_nvenc: false, hevc_nvenc: false };
 let mergeStartTime = 0;
+let musicEnabled = false;     // "Add background music" toggle
+let musicTracks = null;       // { trackPaths, credits, totalSeconds } once fetched
+let musicFetching = false;
+let vibeLabels = {};          // vibe key -> display label (e.g. "🎧 Lo-fi beats")
+let currentEstimate = null;   // { bytes, peakBytes, exact } output-size estimate
+let lastEstimateSig = '';     // signature of inputs the estimate was computed for
 
 const el = {};
 const $ = (id) => document.getElementById(id);
@@ -104,6 +110,38 @@ function outputPlan() {
   const usingGpu = settings.encoder === 'nvenc' || (settings.encoder === 'auto' && encoderInfo[nvencKey]);
   const encLabel = settings.encoder === 'cpu' ? 'CPU' : (usingGpu ? 'GPU' : 'CPU');
   return { t, codec, matching, pureCopy, encLabel };
+}
+
+// A cheap fingerprint of everything that affects the output size, so the
+// (async) estimate is only refetched when one of these actually changes.
+function estimateSignature() {
+  const clipSig = clips.map((c) =>
+    `${c.id}:${c.size}:${c.width}x${c.height}:${Math.round(c.fps || 0)}:${c.vcodec}:${c.compatKey}:${Math.round(c.duration || 0)}`
+  ).join('|');
+  const force = el.reencodeToggle && el.reencodeToggle.checked ? 'R' : '';
+  return `${clipSig}#${settings.resolution}/${settings.fps}/${settings.codec}/${settings.quality}#${force}#${musicEnabled ? 'M' : ''}`;
+}
+
+// Ask the main process for an output-size estimate (it owns the size model), and
+// re-render the summary once it resolves. Fail-soft: on error we just show no
+// estimate rather than blocking anything.
+async function refreshEstimate() {
+  if (!clips.length) { currentEstimate = null; return; }
+  const sigAtCall = lastEstimateSig;
+  let est = null;
+  try {
+    est = await window.api.estimateSize({
+      clips: clips.map((c) => ({
+        size: c.size, duration: c.duration, width: c.width, height: c.height,
+        fps: c.fps, vcodec: c.vcodec, compatKey: c.compatKey
+      })),
+      settings,
+      opts: { forceReencode: !!(el.reencodeToggle && el.reencodeToggle.checked), music: musicEnabled }
+    });
+  } catch (_) { est = null; }
+  if (sigAtCall !== lastEstimateSig) return; // a newer change superseded this estimate
+  currentEstimate = est;
+  updateSummary();
 }
 
 // The "majority" compat key — clips that differ from it are the odd ones out.
@@ -225,8 +263,22 @@ function updateSummary() {
   }
 
   const plan = outputPlan();
+
+  // Recompute the output-size estimate only when a size-affecting input changes
+  // (not on every reorder), then render whatever estimate we currently have.
+  const sig = estimateSignature();
+  if (sig !== lastEstimateSig) { lastEstimateSig = sig; refreshEstimate(); }
+
   if (el.outputInfo) {
-    el.outputInfo.textContent = `→ ${plan.t.W}×${plan.t.H} @ ${plan.t.F}fps · ${plan.codec === 'hevc' ? 'HEVC' : 'H.264'} (${plan.encLabel})`;
+    let txt = `→ ${plan.t.W}×${plan.t.H} @ ${plan.t.F}fps · ${plan.codec === 'hevc' ? 'HEVC' : 'H.264'} (${plan.encLabel})`;
+    if (currentEstimate && currentEstimate.bytes > 0) {
+      txt += ` · est. output ≈ ${fmtSize(currentEstimate.bytes)}`;
+    }
+    el.outputInfo.textContent = txt;
+    el.outputInfo.title = !currentEstimate ? ''
+      : currentEstimate.exact
+        ? 'Lossless copy — output size ≈ the combined size of the input clips.'
+        : 'Re-encoded size is an estimate; the actual size depends on the footage.';
   }
   badge.hidden = false;
   if (plan.pureCopy) {
@@ -260,6 +312,8 @@ function updateMergeControls() {
   el.outputBtn.disabled = !has || merging;
   el.keepCompatBtn.disabled = merging;
   el.openBtn.disabled = merging;
+  if (el.musicToggle) el.musicToggle.disabled = !has || merging || musicFetching;
+  if (el.musicVibe) el.musicVibe.disabled = !has || merging || musicFetching;
 }
 
 // ---------------------------------------------------------------------------
@@ -505,6 +559,16 @@ async function startMerge() {
   const forceReencode = el.reencodeToggle.checked;
   const plan = outputPlan();
 
+  // If background music is on but the tracks aren't ready yet (e.g. an earlier
+  // fetch failed), try once more before committing to a long merge.
+  if (musicEnabled && (!musicTracks || !musicTracks.trackPaths.length)) {
+    await fetchMusicTracks();
+    if (!musicTracks || !musicTracks.trackPaths.length) {
+      setStatus('Background music was requested but could not be fetched. Turn it off to merge without music, or check your connection.', 'error');
+      return;
+    }
+  }
+
   // Use the chosen output location, or ask now.
   let out = outputPath;
   if (!out) {
@@ -515,6 +579,39 @@ async function startMerge() {
   }
   lastOutput = out;
 
+  // Make sure the destination drive has room. The estimate includes the
+  // temporary files created during the merge, so the peak need can be ~2x the
+  // final size. If it looks tight, warn but let the user decide.
+  try {
+    const est = await window.api.estimateSize({
+      clips: clips.map((c) => ({
+        size: c.size, duration: c.duration, width: c.width, height: c.height,
+        fps: c.fps, vcodec: c.vcodec, compatKey: c.compatKey
+      })),
+      settings,
+      opts: { forceReencode, music: musicEnabled }
+    });
+    const space = await window.api.getFreeSpace(out);
+    if (est && est.peakBytes > 0 && space && space.freeBytes > 0) {
+      const needed = Math.round(est.peakBytes * 1.07) + 256 * 1024 * 1024; // margin + container/fs overhead
+      if (needed > space.freeBytes) {
+        const proceed = await window.api.confirmDialog({
+          title: 'Low disk space',
+          message: 'The destination drive may not have enough free space for this merge.',
+          detail: `Estimated space needed: ~${fmtSize(needed)} (including temporary files during the merge).\n`
+            + `Free on ${space.mount || 'the destination drive'}: ${fmtSize(space.freeBytes)}.\n\n`
+            + 'Merge anyway?',
+          confirmText: 'Merge anyway',
+          cancelText: 'Cancel'
+        });
+        if (!proceed) {
+          setStatus('Merge canceled — not enough free space on the destination drive. Free up space or choose another drive via “Save to…”.', 'error');
+          return;
+        }
+      }
+    }
+  } catch (_) { /* if the space check fails for any reason, don't block the merge */ }
+
   merging = true;
   mergeStartTime = Date.now();
   resetMergeUi();
@@ -523,9 +620,10 @@ async function startMerge() {
   el.mergeBtn.hidden = true;
   el.showBtn.hidden = true;
   setProgress(0);
+  const musicNote = (musicEnabled && musicTracks && musicTracks.trackPaths.length) ? ' + chill background music' : '';
   setStatus((plan.pureCopy && !forceReencode)
-    ? 'Merging losslessly (stream copy)…'
-    : `Encoding to ${plan.t.W}×${plan.t.H} @ ${plan.t.F}fps · ${plan.codec === 'hevc' ? 'HEVC' : 'H.264'} (${plan.encLabel})… this can take a while.`);
+    ? 'Merging losslessly (stream copy)…' + musicNote
+    : `Encoding to ${plan.t.W}×${plan.t.H} @ ${plan.t.F}fps · ${plan.codec === 'hevc' ? 'HEVC' : 'H.264'} (${plan.encLabel})${musicNote}… this can take a while.`);
   updateMergeControls();
 
   const payload = {
@@ -545,13 +643,28 @@ async function startMerge() {
     }))
   };
 
+  if (musicEnabled && musicTracks && musicTracks.trackPaths.length) {
+    payload.music = {
+      trackPaths: musicTracks.trackPaths,
+      options: {
+        crossfade: Number(settings.musicCrossfade ?? 4),
+        fadeOut: Number(settings.musicFadeOut ?? 5),
+        fadeIn: 2,
+        volume: Number(settings.musicVolume ?? 100) / 100
+      }
+    };
+  }
+
   try {
     const res = await window.api.startMerge(payload);
     if (res && res.canceled) {
       setStatus('Merge canceled.', 'error');
     } else {
       setProgress(100);
-      setStatus(`Done — saved to ${res.outputPath}`, 'success');
+      const musicNote = res.musicFailed
+        ? ' (background music could not be added, so it was saved without music)'
+        : (res.music ? ' with background music' : '');
+      setStatus(`Done — saved to ${res.outputPath}${musicNote}`, 'success');
       el.showBtn.hidden = false;
     }
   } catch (e) {
@@ -611,7 +724,11 @@ function fmtRemaining(ms) {
 
 function mergeProgressText(p) {
   let action;
-  if (p.phase === 'joining') {
+  if (p.phase === 'music-prep') {
+    action = 'Preparing background music (crossfading tracks into a seamless loop)…';
+  } else if (p.phase === 'music') {
+    action = 'Adding background music to the video (copying video, no re-encode)…';
+  } else if (p.phase === 'joining') {
     action = 'Joining clips losslessly (stream copy)…';
   } else if (p.action === 'copy') {
     action = `Keeping clip ${p.clip}/${p.total} lossless (no re-encode): ${p.clipName || ''}`;
@@ -660,6 +777,119 @@ function updateOutputDisplay() {
     el.outputPath.title = '';
     el.outputPath.classList.remove('set');
   }
+}
+
+// ---------------------------------------------------------------------------
+// Background music
+// ---------------------------------------------------------------------------
+// Populate the vibe dropdown from the catalog in the main process.
+async function populateVibes() {
+  if (!el.musicVibe) return;
+  try {
+    const vibes = await window.api.getMusicVibes();
+    el.musicVibe.innerHTML = '';
+    vibeLabels = {};
+    vibes.forEach((v) => {
+      vibeLabels[v.key] = v.label;
+      const opt = document.createElement('option');
+      opt.value = v.key;
+      opt.textContent = v.label;
+      opt.title = v.description || '';
+      el.musicVibe.appendChild(opt);
+    });
+    el.musicVibe.value = settings.musicVibe || 'mix';
+  } catch (_) { /* ignore */ }
+}
+
+async function onMusicToggle() {
+  musicEnabled = el.musicToggle.checked;
+  if (musicEnabled && (!musicTracks || !musicTracks.trackPaths.length)) {
+    await fetchMusicTracks();
+  } else {
+    updateMusicStatus();
+  }
+  updateSummary(); // music adds an audio track — refresh the size estimate
+}
+
+// Switching vibe persists the choice and, if music is on, fetches the new vibe
+// (instant if it was downloaded before — each vibe has its own cache).
+async function onMusicVibeChange() {
+  settings.musicVibe = el.musicVibe.value;
+  try { await window.api.setSettings({ musicVibe: settings.musicVibe }); } catch (_) { /* ignore */ }
+  if (musicEnabled) {
+    musicTracks = null; // force a refetch for the newly selected vibe
+    await fetchMusicTracks();
+  }
+}
+
+// Fetch (and cache) the royalty-free track pool for the selected vibe. Safe to
+// call repeatedly — the main process reuses anything already downloaded.
+async function fetchMusicTracks() {
+  if (musicFetching) return;
+  musicFetching = true;
+  el.musicCreditsBtn.hidden = true;
+  const label = vibeLabels[settings.musicVibe] || 'chill';
+  el.musicStatus.textContent = `⏳ Finding free ${label} tracks…`;
+  updateMergeControls();
+  try {
+    musicTracks = await window.api.fetchMusic({ vibe: settings.musicVibe });
+    updateMusicStatus();
+    refreshMusicCacheInfo();
+  } catch (e) {
+    musicTracks = null;
+    musicEnabled = false;
+    if (el.musicToggle) el.musicToggle.checked = false;
+    el.musicStatus.textContent = '⚠ Could not fetch music (offline?). ' + (e.message || e);
+    window.api.log('error', 'Music fetch failed (renderer): ' + (e.message || e));
+  } finally {
+    musicFetching = false;
+    updateMergeControls();
+  }
+}
+
+function updateMusicStatus() {
+  if (!el.musicStatus) return;
+  if (!musicEnabled) {
+    el.musicStatus.textContent = '';
+    el.musicCreditsBtn.hidden = true;
+    return;
+  }
+  if (musicTracks && musicTracks.trackPaths.length) {
+    const n = musicTracks.trackPaths.length;
+    const label = vibeLabels[settings.musicVibe] || 'chill';
+    el.musicStatus.textContent = `✓ ${n} CC0 track${n > 1 ? 's' : ''} ready (${label}) — looped & crossfaded to fill your video.`;
+    el.musicCreditsBtn.hidden = !(musicTracks.credits && musicTracks.credits.length);
+  } else {
+    el.musicStatus.textContent = '';
+    el.musicCreditsBtn.hidden = true;
+  }
+}
+
+function showMusicCredits() {
+  if (!musicTracks || !musicTracks.credits || !musicTracks.credits.length) return;
+  const lines = musicTracks.credits.map((c) => `• ${c.creator} — ${c.album} (${c.license})`);
+  const text =
+    'Background music is CC0 / public domain — you are free to use it in any project, including commercially, with no attribution required.\n\n' +
+    'For the record, the tracks in this pool come from (via the Internet Archive):\n' + lines.join('\n');
+  setStatus(text);
+}
+
+function refreshMusicCacheInfo() {
+  if (!el.musicCacheText) return;
+  window.api.getMusicCacheInfo().then((info) => {
+    if (!info || !info.count) { el.musicCacheText.textContent = 'No music downloaded yet.'; return; }
+    el.musicCacheText.textContent = `${info.count} track${info.count > 1 ? 's' : ''} cached · ${fmtSize(info.bytes)}`;
+  }).catch(() => {});
+}
+
+async function clearMusicDownloads() {
+  try {
+    await window.api.clearMusicCache();
+    musicTracks = null;
+    if (musicEnabled && el.musicToggle) { el.musicToggle.checked = false; musicEnabled = false; }
+    updateMusicStatus();
+    refreshMusicCacheInfo();
+  } catch (_) { /* ignore */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -765,17 +995,26 @@ async function loadSettingsIntoUi() {
   el.setEncoder.value = settings.encoder || 'auto';
   el.setCodec.value = settings.codec || 'h264';
   el.setQuality.value = settings.quality || 'near';
+  if (el.setMusicCrossfade) el.setMusicCrossfade.value = String(settings.musicCrossfade ?? 4);
+  if (el.setMusicFadeOut) el.setMusicFadeOut.value = String(settings.musicFadeOut ?? 5);
+  if (el.setMusicVolume) el.setMusicVolume.value = String(settings.musicVolume ?? 100);
+  await populateVibes();
   updateEncoderInfoLabel();
+  refreshMusicCacheInfo();
   updateSummary();
 }
 
 async function onSettingChange() {
   settings = {
+    ...settings, // keep values not represented by a settings-dialog control (e.g. musicVibe)
     resolution: el.setResolution.value,
     fps: el.setFps.value,
     encoder: el.setEncoder.value,
     codec: el.setCodec.value,
-    quality: el.setQuality.value
+    quality: el.setQuality.value,
+    musicCrossfade: parseInt(el.setMusicCrossfade.value, 10),
+    musicFadeOut: parseInt(el.setMusicFadeOut.value, 10),
+    musicVolume: parseInt(el.setMusicVolume.value, 10)
   };
   updateEncoderInfoLabel();
   updateSummary();
@@ -815,6 +1054,10 @@ function init() {
   el.compatBadge = $('compatBadge');
   el.reencodeToggle = $('reencodeToggle');
   el.reencodeLabel = $('reencodeLabel');
+  el.musicToggle = $('musicToggle');
+  el.musicVibe = $('musicVibe');
+  el.musicStatus = $('musicStatus');
+  el.musicCreditsBtn = $('musicCreditsBtn');
   el.statusMsg = $('statusMsg');
   el.copyStatusBtn = $('copyStatusBtn');
   el.progressWrap = $('progressWrap');
@@ -847,6 +1090,12 @@ function init() {
   el.setCodec = $('setCodec');
   el.setQuality = $('setQuality');
   el.encoderInfo = $('encoderInfo');
+  el.setMusicCrossfade = $('setMusicCrossfade');
+  el.setMusicFadeOut = $('setMusicFadeOut');
+  el.setMusicVolume = $('setMusicVolume');
+  el.musicCacheText = $('musicCacheText');
+  el.clearMusicBtn = $('clearMusicBtn');
+  el.browseMusicBtn = $('browseMusicBtn');
 
   el.openBtn.addEventListener('click', openFolder);
   el.openBtn2.addEventListener('click', openFolder);
@@ -854,6 +1103,12 @@ function init() {
   el.shuffleBtn.addEventListener('click', shuffleClips);
   el.mergeBtn.addEventListener('click', startMerge);
   el.cancelBtn.addEventListener('click', () => window.api.cancelMerge());
+  el.reencodeToggle.addEventListener('change', updateSummary); // refresh size estimate
+  el.musicToggle.addEventListener('change', onMusicToggle);
+  el.musicVibe.addEventListener('change', onMusicVibeChange);
+  el.musicCreditsBtn.addEventListener('click', showMusicCredits);
+  el.clearMusicBtn.addEventListener('click', clearMusicDownloads);
+  el.browseMusicBtn.addEventListener('click', () => window.api.openMusicSource());
   el.showBtn.addEventListener('click', () => { if (lastOutput) window.api.showItemInFolder(lastOutput); });
   el.copyStatusBtn.addEventListener('click', copyStatus);
   el.outputBtn.addEventListener('click', chooseOutput);
@@ -867,7 +1122,8 @@ function init() {
   el.openLogBtn.addEventListener('click', () => window.api.openLogFile());
   el.openLogFolderBtn.addEventListener('click', () => window.api.revealLogFile());
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !el.settingsOverlay.hidden) closeSettings(); });
-  ['setResolution', 'setFps', 'setEncoder', 'setCodec', 'setQuality'].forEach((id) => {
+  ['setResolution', 'setFps', 'setEncoder', 'setCodec', 'setQuality',
+    'setMusicCrossfade', 'setMusicFadeOut', 'setMusicVolume'].forEach((id) => {
     el[id].addEventListener('change', onSettingChange);
   });
 
@@ -887,6 +1143,17 @@ function init() {
     el.statusMsg.className = 'status-msg';
     el.copyStatusBtn.hidden = true;
     lastStatusText = el.statusMsg.textContent;
+  });
+
+  // Background-music download progress.
+  window.api.onMusicProgress((p) => {
+    if (!musicFetching) return;
+    const label = vibeLabels[settings.musicVibe] || 'chill';
+    if (p.stage === 'downloading' && p.total) {
+      el.musicStatus.textContent = `⏳ Downloading ${label} tracks… ${p.index || 0}/${p.total} (${p.percent || 0}%)`;
+    } else if (p.stage === 'listing') {
+      el.musicStatus.textContent = `⏳ Finding free ${label} tracks…`;
+    }
   });
 
   // Auto-update: listen for status from main, then check the releases page.

@@ -25,6 +25,18 @@ function probe(f) {
     out.trim().split(/\r?\n/).join(' | '));
 }
 
+function audioStreamCount(f) {
+  const out = execFileSync(ffprobePath, ['-v', 'error', '-select_streams', 'a',
+    '-show_entries', 'stream=index', '-of', 'csv=p=0', f]).toString().trim();
+  return out ? out.split(/\r?\n/).filter(Boolean).length : 0;
+}
+
+function durationOf(f) {
+  const out = execFileSync(ffprobePath, ['-v', 'error', '-show_entries', 'format=duration',
+    '-of', 'default=nokey=1:noprint_wrappers=1', f]).toString().trim();
+  return parseFloat(out) || 0;
+}
+
 (async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vmt-test-'));
   console.log('Test dir:', dir, '\n');
@@ -76,6 +88,28 @@ function probe(f) {
   console.log('\n  result:', JSON.stringify(r2));
   probe(outRe);
   console.log('  output exists  :', fs.existsSync(outRe) ? 'PASS' : 'FAIL');
+
+  // --- Background music: loop + crossfade a small pool under the merged video ---
+  console.log('\n--- Merge with background music (A+B + 2 local tracks, no network) ---');
+  gen(dir, 'music1.mp3', ['-f', 'lavfi', '-i', 'sine=frequency=220:duration=6', '-c:a', 'libmp3lame', '-b:a', '128k']);
+  gen(dir, 'music2.mp3', ['-f', 'lavfi', '-i', 'sine=frequency=300:duration=5', '-c:a', 'libmp3lame', '-b:a', '128k']);
+  const outMusic = path.join(dir, 'merged_music.mp4');
+  const r3 = await ffmpeg.merge({
+    outputPath: outMusic,
+    clips: clips.filter((c) => c.name !== 'C_clip.mp4'), // A+B = ~4s of video
+    music: {
+      trackPaths: [path.join(dir, 'music1.mp3'), path.join(dir, 'music2.mp3')],
+      options: { crossfade: 1, fadeIn: 1, fadeOut: 1, volume: 0.8 }
+    }
+  }, onProg());
+  console.log('\n  result:', JSON.stringify(r3));
+  probe(outMusic);
+  const aCount = audioStreamCount(outMusic);
+  const mDur = durationOf(outMusic);
+  console.log('  output exists  :', fs.existsSync(outMusic) ? 'PASS' : 'FAIL');
+  console.log('  has audio track:', aCount >= 1 ? 'PASS' : `FAIL (${aCount})`);
+  console.log('  music flag set :', r3 && r3.music ? 'PASS' : 'FAIL');
+  console.log('  trimmed to video length (~4s):', (mDur > 3 && mDur < 5) ? 'PASS' : `FAIL (${mDur.toFixed(2)}s)`);
 
   fs.rmSync(dir, { recursive: true, force: true });
   console.log('\nAll engine tests completed. Cleaned up temp dir.');
