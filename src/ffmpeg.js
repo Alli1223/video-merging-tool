@@ -198,15 +198,27 @@ function runFfmpeg(args, totalDuration, onProgress) {
 
     let stdoutBuf = '';
     let errTail = '';
+    let cur = {};
 
     proc.stdout.on('data', (d) => {
       stdoutBuf += d.toString();
       const lines = stdoutBuf.split(/\r?\n/);
       stdoutBuf = lines.pop(); // keep the trailing partial line
       for (const line of lines) {
-        const seconds = parseProgressTime(line);
-        if (seconds != null) {
-          onProgress({ percent: computePercent(seconds, totalDuration), seconds, totalDuration });
+        const eq = line.indexOf('=');
+        if (eq < 0) continue;
+        const key = line.slice(0, eq);
+        const val = line.slice(eq + 1);
+        if (key === 'out_time') { const s = parseProgressTime(line); if (s != null) cur.seconds = s; }
+        else if (key === 'fps') cur.fps = parseFloat(val) || 0;
+        else if (key === 'speed') cur.speed = parseFloat(val) || 0; // "2.5x" -> 2.5
+        else if (key === 'bitrate') cur.bitrate = val.trim();
+        else if (key === 'progress') {
+          // end of one progress block — emit a snapshot
+          if (cur.seconds != null) {
+            onProgress({ percent: computePercent(cur.seconds, totalDuration), seconds: cur.seconds, fps: cur.fps || 0, speed: cur.speed || 0, bitrate: cur.bitrate || '', totalDuration });
+          }
+          cur = {};
         }
       }
     });
@@ -268,21 +280,51 @@ async function mergeReencode(clips, outputPath, target, encOpts, totalDuration, 
 // normalized segment, then all segments are joined by stream copy. Falls back
 // to a full re-encode if the stream-copy join fails.
 async function mergeHybrid(clips, outputPath, target, encOpts, codecName, totalDuration, onProgress, forceReencode) {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vmt-seg-'));
+  // Keep the working segments on the SAME drive as the output: this avoids
+  // filling the system drive (C:) with potentially many GB of intermediates,
+  // and makes the final stream-copy join a fast same-volume operation. Fall
+  // back to the system temp dir only if the output folder isn't writable.
+  let tmpDir;
+  try {
+    tmpDir = fs.mkdtempSync(path.join(path.dirname(outputPath), 'vmt-tmp-'));
+  } catch (e) {
+    log.warn('Could not create a temp folder next to the output; using system temp:', String((e && e.message) || e));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vmt-seg-'));
+  }
+  log.info('Hybrid merge working dir:', tmpDir);
   const segments = [];
   try {
     let done = 0;
+    let useNvencNow = encOpts.useNvenc;
     for (let i = 0; i < clips.length; i++) {
       if (canceled) { const e = new Error('Merge canceled'); e.canceled = true; throw e; }
       const clip = clips[i];
       const seg = path.join(tmpDir, `seg-${String(i).padStart(4, '0')}.mp4`);
       const copyVideo = !forceReencode && matchesTargetVideo(clip, target, codecName);
-      const args = buildSegmentArgs(clip, target, encOpts, seg, copyVideo);
       const base = done;
-      await runFfmpeg(args, clip.duration || 0, (p) => {
+      const onSeg = (p) => {
         // Per-clip processing occupies 0..92% of the progress bar.
-        onProgress({ percent: computePercent(base + (p.seconds || 0), totalDuration) * 0.92, phase: 'encoding', clip: i + 1, total: clips.length });
-      });
+        onProgress({
+          percent: computePercent(base + (p.seconds || 0), totalDuration) * 0.92,
+          phase: 'encoding', clip: i + 1, total: clips.length,
+          clipName: clip.name || path.basename(String(clip.path || '')),
+          action: copyVideo ? 'copy' : 'encode',
+          encoder: useNvencNow ? 'gpu' : 'cpu',
+          codec: encOpts.codec,
+          fps: p.fps, speed: p.speed
+        });
+      };
+      try {
+        await runFfmpeg(buildSegmentArgs(clip, target, { ...encOpts, useNvenc: useNvencNow }, seg, copyVideo), clip.duration || 0, onSeg);
+      } catch (e) {
+        if (canceled || copyVideo || !useNvencNow) throw e;
+        // GPU encode failed (e.g. resolution/codec the GPU can't do) — drop to
+        // CPU for this clip and the rest of the merge.
+        log.warn(`GPU encode failed for clip ${i + 1}; retrying this and the remaining clips on CPU:`, String((e && e.message) || e));
+        useNvencNow = false;
+        safeUnlink(seg);
+        await runFfmpeg(buildSegmentArgs(clip, target, { ...encOpts, useNvenc: false }, seg, false), clip.duration || 0, onSeg);
+      }
       done += clip.duration || 0;
       segments.push(seg);
     }
@@ -291,7 +333,7 @@ async function mergeHybrid(clips, outputPath, target, encOpts, codecName, totalD
     fs.writeFileSync(listFile, concatListContent(segments.map((s) => ({ path: s }))), 'utf8');
     try {
       await runFfmpeg(buildCopyArgs(listFile, outputPath), totalDuration,
-        (p) => onProgress({ percent: 92 + (p.percent || 0) * 0.08, phase: 'joining' }));
+        (p) => onProgress({ percent: 92 + (p.percent || 0) * 0.08, phase: 'joining', fps: p.fps, speed: p.speed }));
     } catch (joinErr) {
       if (canceled) throw joinErr;
       log.warn('Stream-copy join failed; falling back to a full re-encode:', String((joinErr && joinErr.message) || joinErr));
@@ -321,8 +363,15 @@ async function merge(opts, onProgress) {
   const enc = await detectEncoders();
   const nvencForCodec = codec === 'hevc' ? enc.hevc_nvenc : enc.h264_nvenc;
   const wanted = settings.encoder || 'auto';
-  const useNvenc = wanted === 'cpu' ? false : nvencForCodec;
+  let useNvenc = wanted === 'cpu' ? false : nvencForCodec;
   if (wanted === 'nvenc' && !nvencForCodec) log.warn('NVENC requested but unavailable for', codec, '- using CPU.');
+  // NVENC has a max resolution (~4096px for H.264, ~8192px for HEVC). Above that
+  // the GPU encoder can't open ("Width NNNN exceeds 4096"), so use the CPU.
+  const nvencMax = codec === 'hevc' ? 8192 : 4096;
+  if (useNvenc && (target.W > nvencMax || target.H > nvencMax)) {
+    log.warn(`Target ${target.W}x${target.H} exceeds ${codec} NVENC limit (${nvencMax}px); using CPU.`);
+    useNvenc = false;
+  }
   const encOpts = { codec, useNvenc, quality };
   log.info('Merge:', { clips: clips.length, target, codec, quality, encoder: wanted, useNvenc });
 
