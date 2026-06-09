@@ -1,0 +1,36 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "node16",
+    "moduleResolution": "node16",
+    // The renderer is a classic <script> with no import/export; "legacy" keeps
+    // such files as plain scripts (no CommonJS `exports` wrapper that would
+    // crash in the browser) while import-bearing files still emit modules.
+    "moduleDetection": "legacy",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "rootDir": ".",
+    "outDir": "out",
+
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "sourceMap": true,
+    "declaration": false,
+    "types": ["node"]
+  },
+  "include": [
+    "main.ts",
+    "preload.ts",
+    "selftest.ts",
+    "src/**/*.ts",
+    "renderer/**/*.ts",
+    "test/**/*.ts"
+  ],
+  "exclude": ["node_modules", "out", "dist", "build", "scripts"]
+}

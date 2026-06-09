@@ -1,9 +1,10 @@
-const { contextBridge, ipcRenderer } = require('electron');
+import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
 
 // Safe, minimal API surface exposed to the renderer. The renderer never gets
 // direct access to Node, FFmpeg, or the filesystem — everything goes through
-// these IPC calls which are handled in the main process.
-contextBridge.exposeInMainWorld('api', {
+// these IPC calls which are handled in the main process. Typing the object as
+// `Api` keeps this bridge in lock-step with what the renderer consumes.
+const api: Api = {
   // Open a native folder picker. Resolves to the chosen path, or null if canceled.
   openFolder: () => ipcRenderer.invoke('dialog:openFolder'),
 
@@ -14,7 +15,7 @@ contextBridge.exposeInMainWorld('api', {
   // one at a time via the onThumb subscription below.
   generateThumbnails: (items) => ipcRenderer.invoke('thumbs:generate', items),
   onThumb: (cb) => {
-    const handler = (_e, data) => cb(data);
+    const handler = (_e: IpcRendererEvent, data: ThumbDone) => cb(data);
     ipcRenderer.on('thumb:done', handler);
     return () => ipcRenderer.removeListener('thumb:done', handler);
   },
@@ -30,7 +31,7 @@ contextBridge.exposeInMainWorld('api', {
   // Start a merge. Progress streams back via onMergeProgress.
   startMerge: (opts) => ipcRenderer.invoke('merge:start', opts),
   onMergeProgress: (cb) => {
-    const handler = (_e, data) => cb(data);
+    const handler = (_e: IpcRendererEvent, data: Progress) => cb(data);
     ipcRenderer.on('merge:progress', handler);
     return () => ipcRenderer.removeListener('merge:progress', handler);
   },
@@ -42,7 +43,7 @@ contextBridge.exposeInMainWorld('api', {
   getMusicVibes: () => ipcRenderer.invoke('music:vibes'),
   fetchMusic: (opts) => ipcRenderer.invoke('music:fetch', opts),
   onMusicProgress: (cb) => {
-    const handler = (_e, data) => cb(data);
+    const handler = (_e: IpcRendererEvent, data: MusicProgress) => cb(data);
     ipcRenderer.on('music:progress', handler);
     return () => ipcRenderer.removeListener('music:progress', handler);
   },
@@ -77,8 +78,10 @@ contextBridge.exposeInMainWorld('api', {
   installUpdate: () => ipcRenderer.invoke('update:install'),
   openReleases: () => ipcRenderer.invoke('update:openReleases'),
   onUpdateStatus: (cb) => {
-    const handler = (_e, data) => cb(data);
+    const handler = (_e: IpcRendererEvent, data: UpdateStatus) => cb(data);
     ipcRenderer.on('update:status', handler);
     return () => ipcRenderer.removeListener('update:status', handler);
   }
-});
+};
+
+contextBridge.exposeInMainWorld('api', api);

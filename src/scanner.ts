@@ -1,16 +1,27 @@
-const fsp = require('fs').promises;
-const path = require('path');
-const ffmpeg = require('./ffmpeg');
-const { isVideoFile, resolveCaptureTime, compatKey, sortClips } = require('./metadata');
-const log = require('./logger');
+import { promises as fsp } from 'fs';
+import type { Stats } from 'fs';
+import path from 'path';
+import * as ffmpeg from './ffmpeg';
+import { isVideoFile, resolveCaptureTime, compatKey, sortClips } from './metadata';
+import * as log from './logger';
+
+function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+interface ProbedFile {
+  file: string;
+  meta: ProbeResult;
+  stat: Stats;
+}
 
 // Probe a list of files with bounded concurrency.
-async function probeAll(files) {
+async function probeAll(files: string[]): Promise<ProbedFile[]> {
   const concurrency = Math.min(6, files.length || 1);
-  const results = new Array(files.length);
+  const results: (ProbedFile | null)[] = new Array(files.length);
   let cursor = 0;
 
-  async function worker() {
+  async function worker(): Promise<void> {
     while (cursor < files.length) {
       const i = cursor++;
       const file = files[i];
@@ -21,19 +32,19 @@ async function probeAll(files) {
         ]);
         results[i] = { file, meta, stat };
       } catch (e) {
-        log.warn('Could not probe', file, '-', String((e && e.message) || e));
+        log.warn('Could not probe', file, '-', errMsg(e));
         results[i] = null; // unreadable / not a real media file — drop it
       }
     }
   }
 
-  const workers = [];
+  const workers: Promise<void>[] = [];
   for (let i = 0; i < concurrency; i++) workers.push(worker());
   await Promise.all(workers);
-  return results.filter(Boolean);
+  return results.filter((r): r is ProbedFile => r !== null);
 }
 
-async function scanDirectory(dir) {
+export async function scanDirectory(dir: string): Promise<ScanResult> {
   log.info('Scanning directory:', dir);
   const entries = await fsp.readdir(dir, { withFileTypes: true });
   const files = entries
@@ -44,7 +55,7 @@ async function scanDirectory(dir) {
   const probed = await probeAll(files);
 
   let idCounter = 0;
-  const clips = probed
+  const clips: Clip[] = probed
     .filter((p) => p.meta.hasVideo) // only keep entries with a real video stream
     .map(({ file, meta, stat }) => {
       const name = path.basename(file);
@@ -72,11 +83,9 @@ async function scanDirectory(dir) {
       };
     });
 
-  const stats = { matched: files.length, probed: probed.length, withVideo: clips.length };
+  const stats: ScanStats = { matched: files.length, probed: probed.length, withVideo: clips.length };
   log.info(`Scan complete: ${stats.matched} matched, ${stats.probed} probed OK, ${stats.withVideo} with a video stream`);
 
   // Default order: oldest first by capture time, name as a tiebreaker.
   return { dir, clips: sortClips(clips, 'date-asc'), stats };
 }
-
-module.exports = { scanDirectory };

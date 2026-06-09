@@ -36,26 +36,32 @@ drag-and-drop timeline, and merges them into a single file.
 - [Node.js](https://nodejs.org/) 18 or newer (only needed to install/run from
   source; a packaged build needs nothing).
 
+The app is written in **TypeScript** (strict mode). The source `.ts` files
+compile to plain JavaScript in `out/`, which is what Electron actually runs.
+
 ## Run from source
 
 ```bash
 npm install     # downloads Electron + the FFmpeg binaries for your OS
-npm start
+npm start       # compiles TypeScript to out/, then launches Electron
 ```
 
-Run `npm install` on each OS you want to use it on — the correct FFmpeg binary
-is fetched for the current platform.
+`npm start` runs `npm run build` (`tsc` + copying the static renderer assets and
+icons into `out/`) before starting Electron. Run `npm install` on each OS you
+want to use it on — the correct FFmpeg binary is fetched for the current platform.
 
 ## Tests
 
 ```bash
-npm test            # fast unit tests (ordering, compatibility, FFmpeg arg building)
-npm run test:engine # headless end-to-end smoke test of the real FFmpeg pipeline
+npm test            # type-checks + runs the fast unit tests
+npm run test:engine # type-checks + headless end-to-end test of the real FFmpeg pipeline
+npm run typecheck   # type-check only (tsc --noEmit), no output emitted
 ```
 
-`npm test` uses Node's built-in test runner (no extra dependencies) and runs in
-under a second. `npm run test:engine` generates a few clips and exercises both
-the lossless and re-encode merge paths end to end — handy for confirming the
+`npm test` first compiles the project (so a type error anywhere fails the run),
+then uses Node's built-in test runner against the compiled tests in `out/test/`.
+`npm run test:engine` generates a few clips and exercises the lossless,
+re-encode, and background-music merge paths end to end — handy for confirming the
 bundled FFmpeg works after installing on a new OS (e.g. Linux).
 
 ## Build a standalone app
@@ -140,15 +146,19 @@ therefore not bit-for-bit lossless (though CRF 18 is visually near-lossless).
 
 | File | Role |
 |------|------|
-| `main.js` | Electron main process; owns windows and IPC. |
-| `preload.js` | Safe `window.api` bridge to the renderer. |
-| `src/metadata.js` | Pure logic: file detection, capture-time resolution, compatibility keys, ordering. |
-| `src/ffargs.js` | Pure logic: FFmpeg argument/filter-graph construction and progress parsing. |
-| `src/ffmpeg.js` | Spawns ffprobe/ffmpeg for probing, thumbnails, and both merge paths. |
-| `src/scanner.js` | Directory scan that wires `ffmpeg` + `metadata` together. |
-| `renderer/` | The UI (HTML/CSS/JS): clip list, timeline, merge controls. |
+| `main.ts` | Electron main process; owns windows and IPC. |
+| `preload.ts` | Safe `window.api` bridge to the renderer (typed against the `Api` contract). |
+| `src/global.d.ts` | Shared ambient types: the domain model and the `window.api` IPC contract. |
+| `src/metadata.ts` | Pure logic: file detection, capture-time resolution, compatibility keys, ordering. |
+| `src/ffargs.ts` | Pure logic: FFmpeg argument/filter-graph construction and progress parsing. |
+| `src/ffmpeg.ts` | Spawns ffprobe/ffmpeg for probing, thumbnails, and both merge paths. |
+| `src/scanner.ts` | Directory scan that wires `ffmpeg` + `metadata` together. |
+| `src/music.ts` | Fetches & caches CC0 background music from the Internet Archive. |
+| `renderer/` | The UI: `index.html`, `styles.css`, and `renderer.ts` (clip list, timeline, controls). |
 | `test/` | Unit tests for the pure modules (`npm test`). |
-| `selftest.js` | End-to-end engine smoke test (`npm run test:engine`). |
+| `selftest.ts` | End-to-end engine smoke test (`npm run test:engine`). |
+| `tsconfig.json` | TypeScript config (strict). Compiles `.ts` → `out/`. |
+| `scripts/copy-assets.js` | Build step: copies HTML/CSS/icons into `out/` next to the compiled JS. |
 | `.github/workflows/ci.yml` | CI: unit tests + Windows installer build. |
 
 ## Supported containers
