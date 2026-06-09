@@ -1,50 +1,123 @@
-'use strict';
+// This file is a classic browser <script> (no import/export), so it compiles to
+// a plain script the renderer loads directly. It talks to the main process only
+// through the typed `window.api` bridge declared in src/global.d.ts.
 
 // Forward uncaught renderer errors to the log file so problems are visible.
 window.addEventListener('error', (e) => {
-  try { window.api.log('error', 'renderer error: ' + ((e.error && e.error.stack) || e.message)); } catch (_) {}
+  try { window.api.log('error', 'renderer error: ' + ((e.error && e.error.stack) || e.message)); } catch { /* ignore */ }
 });
 window.addEventListener('unhandledrejection', (e) => {
-  try { window.api.log('error', 'renderer unhandledrejection: ' + ((e.reason && e.reason.stack) || e.reason)); } catch (_) {}
+  try { window.api.log('error', 'renderer unhandledrejection: ' + ((e.reason && e.reason.stack) || e.reason)); } catch { /* ignore */ }
 });
+
+function errText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+type SortModeUI = SortMode | 'custom';
+
+// Strongly-typed handle to every element the renderer touches.
+interface Elements {
+  openBtn: HTMLButtonElement;
+  openBtn2: HTMLButtonElement;
+  sortSelect: HTMLSelectElement;
+  shuffleBtn: HTMLButtonElement;
+  folderPath: HTMLElement;
+  emptyState: HTMLElement;
+  listContainer: HTMLElement;
+  loadingState: HTMLElement;
+  loadingText: HTMLElement;
+  clipList: HTMLUListElement;
+  clipCount: HTMLElement;
+  previewPane: HTMLElement;
+  previewVideo: HTMLVideoElement;
+  previewInfo: HTMLElement;
+  timeline: HTMLElement;
+  totalDuration: HTMLElement;
+  compatBadge: HTMLElement;
+  reencodeToggle: HTMLInputElement;
+  reencodeLabel: HTMLElement;
+  musicToggle: HTMLInputElement;
+  musicVibe: HTMLSelectElement;
+  musicStatus: HTMLElement;
+  musicCreditsBtn: HTMLButtonElement;
+  statusMsg: HTMLElement;
+  copyStatusBtn: HTMLButtonElement;
+  progressWrap: HTMLElement;
+  progressBar: HTMLElement;
+  progressText: HTMLElement;
+  mergeBtn: HTMLButtonElement;
+  cancelBtn: HTMLButtonElement;
+  showBtn: HTMLButtonElement;
+  outputBtn: HTMLButtonElement;
+  outputPath: HTMLElement;
+  keepCompatBtn: HTMLButtonElement;
+  updateBanner: HTMLElement;
+  updateText: HTMLElement;
+  updateActionBtn: HTMLButtonElement;
+  updateDismiss: HTMLButtonElement;
+  settingsBtn: HTMLButtonElement;
+  settingsOverlay: HTMLElement;
+  settingsClose: HTMLButtonElement;
+  settingsVersion: HTMLElement;
+  checkUpdatesBtn: HTMLButtonElement;
+  updateStatusText: HTMLElement;
+  openReleasesBtn: HTMLButtonElement;
+  openLogBtn: HTMLButtonElement;
+  openLogFolderBtn: HTMLButtonElement;
+  logPathText: HTMLElement;
+  outputInfo: HTMLElement;
+  setResolution: HTMLSelectElement;
+  setFps: HTMLSelectElement;
+  setEncoder: HTMLSelectElement;
+  setCodec: HTMLSelectElement;
+  setQuality: HTMLSelectElement;
+  encoderInfo: HTMLElement;
+  setMusicCrossfade: HTMLSelectElement;
+  setMusicFadeOut: HTMLSelectElement;
+  setMusicVolume: HTMLSelectElement;
+  musicCacheText: HTMLElement;
+  clearMusicBtn: HTMLButtonElement;
+  browseMusicBtn: HTMLButtonElement;
+}
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
-let clips = [];            // ordered clip objects (thumb filled in async)
-let sortMode = 'date-asc';
-let selectedId = null;
-let folderPath = null;
+let clips: Clip[] = [];            // ordered clip objects (thumb filled in async)
+let sortMode: SortModeUI = 'date-asc';
+let selectedId: number | null = null;
+let folderPath: string | null = null;
 let merging = false;
-let lastOutput = null;
-let outputPath = null; // user-chosen save location (null = ask at merge time)
+let lastOutput: string | null = null;
+let outputPath: string | null = null; // user-chosen save location (null = ask at merge time)
 let lastStatusText = '';
-let settings = { resolution: 'auto', fps: 'auto', encoder: 'auto', codec: 'hevc', quality: 'near', musicCrossfade: 4, musicFadeOut: 5, musicVolume: 100 };
-let encoderInfo = { h264_nvenc: false, hevc_nvenc: false };
+let settings: Settings = { resolution: 'auto', fps: 'auto', encoder: 'auto', codec: 'hevc', quality: 'near', musicVibe: 'mix', musicCrossfade: 4, musicFadeOut: 5, musicVolume: 100 };
+let encoderInfo: EncoderInfo = { h264_nvenc: false, hevc_nvenc: false };
 let mergeStartTime = 0;
 let musicEnabled = false;     // "Add background music" toggle
-let musicTracks = null;       // { trackPaths, credits, totalSeconds } once fetched
+let musicTracks: MusicResult | null = null; // { trackPaths, credits, totalSeconds } once fetched
 let musicFetching = false;
-let vibeLabels = {};          // vibe key -> display label (e.g. "🎧 Lo-fi beats")
-let currentEstimate = null;   // { bytes, peakBytes, exact } output-size estimate
+let vibeLabels: Record<string, string> = {}; // vibe key -> display label (e.g. "🎧 Lo-fi beats")
+let currentEstimate: SizeEstimate | null = null; // output-size estimate
 let lastEstimateSig = '';     // signature of inputs the estimate was computed for
 
-const el = {};
-const $ = (id) => document.getElementById(id);
+const el = {} as Elements;
+const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
 // ---------------------------------------------------------------------------
-function fmtDuration(sec) {
+function fmtDuration(sec: number): string {
   sec = Math.round(sec || 0);
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const s = sec % 60;
-  const pad = (n) => String(n).padStart(2, '0');
+  const pad = (n: number) => String(n).padStart(2, '0');
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
-function fmtSize(bytes) {
+function fmtSize(bytes: number): string {
   if (!bytes) return '—';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let i = 0;
@@ -53,16 +126,16 @@ function fmtSize(bytes) {
   return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
 }
 
-function fmtTime(ms) {
+function fmtTime(ms: number): string {
   try {
     return new Date(ms).toLocaleString(undefined, {
       year: 'numeric', month: 'short', day: 'numeric',
       hour: '2-digit', minute: '2-digit'
     });
-  } catch (_) { return '—'; }
+  } catch { return '—'; }
 }
 
-const SOURCE_LABEL = {
+const SOURCE_LABEL: Record<TimeSource, string> = {
   metadata: 'metadata',
   filename: 'filename',
   created: 'file created',
@@ -74,39 +147,40 @@ const SOURCE_LABEL = {
 // ---------------------------------------------------------------------------
 // Lossless stream-copy is only safe when every clip shares the same codecs and
 // parameters. We derive that from the per-clip compatKey computed during scan.
-function compatibility() {
+function compatibility(): { lossless: boolean; keys: number } {
   if (clips.length === 0) return { lossless: false, keys: 0 };
   const keys = new Set(clips.map((c) => c.compatKey));
   return { lossless: keys.size === 1, keys: keys.size };
 }
 
-// Named output resolutions (kept in sync with src/ffargs.js RESOLUTIONS).
-const RES = { 2160: [3840, 2160], 1440: [2560, 1440], 1080: [1920, 1080], 720: [1280, 720] };
+// Named output resolutions (kept in sync with src/ffargs.ts RESOLUTIONS).
+const RES: Record<string, [number, number]> = { 2160: [3840, 2160], 1440: [2560, 1440], 1080: [1920, 1080], 720: [1280, 720] };
 
 // Resolve the output target {W,H,F} from settings + clips (for display + the
 // "what will happen" summary). The main process resolves it authoritatively.
-function resolveTargetLocal() {
+function resolveTargetLocal(): Target {
   let W = 0, H = 0, F = 0;
   for (const c of clips) { if (c.width > W) W = c.width; if (c.height > H) H = c.height; if (c.fps > F) F = c.fps; }
   W = Math.max(2, W - (W % 2)); H = Math.max(2, H - (H % 2));
   F = F > 0 ? Math.min(Math.round(F), 60) : 30;
-  if (RES[settings.resolution]) { W = RES[settings.resolution][0]; H = RES[settings.resolution][1]; }
+  const r = RES[settings.resolution];
+  if (r) { W = r[0]; H = r[1]; }
   if (settings.fps && settings.fps !== 'auto') { const f = parseInt(settings.fps, 10); if (f > 0) F = f; }
   return { W, H, F };
 }
 
-function matchesTargetLocal(c, t, codec) {
+function matchesTargetLocal(c: Clip, t: Target, codec: Codec): boolean {
   return c.width === t.W && c.height === t.H && Math.round(c.fps || 0) === t.F && c.vcodec === codec;
 }
 
 // What the merge will produce given the current clips + settings.
-function outputPlan() {
+function outputPlan(): { t: Target; codec: Codec; matching: number; pureCopy: boolean; encLabel: string } {
   const t = resolveTargetLocal();
-  const codec = settings.codec === 'hevc' ? 'hevc' : 'h264';
+  const codec: Codec = settings.codec === 'hevc' ? 'hevc' : 'h264';
   const matching = clips.filter((c) => matchesTargetLocal(c, t, codec)).length;
   const allCompat = clips.length > 0 && new Set(clips.map((c) => c.compatKey)).size === 1;
   const pureCopy = clips.length > 0 && matching === clips.length && allCompat;
-  const nvencKey = codec === 'hevc' ? 'hevc_nvenc' : 'h264_nvenc';
+  const nvencKey: keyof EncoderInfo = codec === 'hevc' ? 'hevc_nvenc' : 'h264_nvenc';
   const usingGpu = settings.encoder === 'nvenc' || (settings.encoder === 'auto' && encoderInfo[nvencKey]);
   const encLabel = settings.encoder === 'cpu' ? 'CPU' : (usingGpu ? 'GPU' : 'CPU');
   return { t, codec, matching, pureCopy, encLabel };
@@ -114,7 +188,7 @@ function outputPlan() {
 
 // A cheap fingerprint of everything that affects the output size, so the
 // (async) estimate is only refetched when one of these actually changes.
-function estimateSignature() {
+function estimateSignature(): string {
   const clipSig = clips.map((c) =>
     `${c.id}:${c.size}:${c.width}x${c.height}:${Math.round(c.fps || 0)}:${c.vcodec}:${c.compatKey}:${Math.round(c.duration || 0)}`
   ).join('|');
@@ -125,10 +199,10 @@ function estimateSignature() {
 // Ask the main process for an output-size estimate (it owns the size model), and
 // re-render the summary once it resolves. Fail-soft: on error we just show no
 // estimate rather than blocking anything.
-async function refreshEstimate() {
+async function refreshEstimate(): Promise<void> {
   if (!clips.length) { currentEstimate = null; return; }
   const sigAtCall = lastEstimateSig;
-  let est = null;
+  let est: SizeEstimate | null = null;
   try {
     est = await window.api.estimateSize({
       clips: clips.map((c) => ({
@@ -138,23 +212,23 @@ async function refreshEstimate() {
       settings,
       opts: { forceReencode: !!(el.reencodeToggle && el.reencodeToggle.checked), music: musicEnabled }
     });
-  } catch (_) { est = null; }
+  } catch { est = null; }
   if (sigAtCall !== lastEstimateSig) return; // a newer change superseded this estimate
   currentEstimate = est;
   updateSummary();
 }
 
 // The "majority" compat key — clips that differ from it are the odd ones out.
-function majorityKey() {
-  const counts = {};
+function majorityKey(): string | null {
+  const counts: Record<string, number> = {};
   for (const c of clips) counts[c.compatKey] = (counts[c.compatKey] || 0) + 1;
-  let best = null, bestN = -1;
+  let best: string | null = null, bestN = -1;
   for (const k in counts) if (counts[k] > bestN) { best = k; bestN = counts[k]; }
   return best;
 }
 
 // How many clips differ from the majority format (the re-encode culprits).
-function countMismatched() {
+function countMismatched(): number {
   if (clips.length < 2) return 0;
   const major = majorityKey();
   return clips.filter((c) => c.compatKey !== major).length;
@@ -163,14 +237,14 @@ function countMismatched() {
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
-function renderAll() {
+function renderAll(): void {
   renderList();
   renderTimeline();
   updateSummary();
   updateMergeControls();
 }
 
-function renderList() {
+function renderList(): void {
   const list = el.clipList;
   list.innerHTML = '';
   const major = clips.length ? majorityKey() : null;
@@ -180,8 +254,8 @@ function renderList() {
     const li = document.createElement('li');
     li.className = 'clip' + (c.id === selectedId ? ' selected' : '') + (odd ? ' compat-warn' : '');
     li.draggable = true;
-    li.dataset.id = c.id;
-    li.dataset.index = i;
+    li.dataset.id = String(c.id);
+    li.dataset.index = String(i);
 
     const audio = c.hasAudio ? `${c.acodec || 'audio'}` : 'no audio';
     const res = c.width && c.height ? `${c.width}×${c.height}` : '—';
@@ -213,7 +287,7 @@ function renderList() {
   attachRowEvents();
 }
 
-function renderTimeline() {
+function renderTimeline(): void {
   const tl = el.timeline;
   tl.innerHTML = '';
   if (clips.length === 0) {
@@ -229,8 +303,8 @@ function renderTimeline() {
     const div = document.createElement('div');
     div.className = 'tl-clip' + (odd ? ' compat-warn' : '');
     div.draggable = true;
-    div.dataset.id = c.id;
-    div.dataset.index = i;
+    div.dataset.id = String(c.id);
+    div.dataset.index = String(i);
     div.style.width = width + 'px';
     if (c.thumb) div.style.backgroundImage = `url('${c.thumb}')`;
     div.innerHTML = `
@@ -246,7 +320,7 @@ function renderTimeline() {
   attachTimelineEvents();
 }
 
-function updateSummary() {
+function updateSummary(): void {
   const total = clips.reduce((s, c) => s + (c.duration || 0), 0);
   const size = clips.reduce((s, c) => s + (c.size || 0), 0);
   el.clipCount.textContent = clips.length
@@ -258,7 +332,7 @@ function updateSummary() {
   if (clips.length === 0) {
     badge.hidden = true;
     el.keepCompatBtn.hidden = true;
-    if (el.outputInfo) el.outputInfo.textContent = '';
+    el.outputInfo.textContent = '';
     return;
   }
 
@@ -269,17 +343,16 @@ function updateSummary() {
   const sig = estimateSignature();
   if (sig !== lastEstimateSig) { lastEstimateSig = sig; refreshEstimate(); }
 
-  if (el.outputInfo) {
-    let txt = `→ ${plan.t.W}×${plan.t.H} @ ${plan.t.F}fps · ${plan.codec === 'hevc' ? 'HEVC' : 'H.264'} (${plan.encLabel})`;
-    if (currentEstimate && currentEstimate.bytes > 0) {
-      txt += ` · est. output ≈ ${fmtSize(currentEstimate.bytes)}`;
-    }
-    el.outputInfo.textContent = txt;
-    el.outputInfo.title = !currentEstimate ? ''
-      : currentEstimate.exact
-        ? 'Lossless copy — output size ≈ the combined size of the input clips.'
-        : 'Re-encoded size is an estimate; the actual size depends on the footage.';
+  let txt = `→ ${plan.t.W}×${plan.t.H} @ ${plan.t.F}fps · ${plan.codec === 'hevc' ? 'HEVC' : 'H.264'} (${plan.encLabel})`;
+  if (currentEstimate && currentEstimate.bytes > 0) {
+    txt += ` · est. output ≈ ${fmtSize(currentEstimate.bytes)}`;
   }
+  el.outputInfo.textContent = txt;
+  el.outputInfo.title = !currentEstimate ? ''
+    : currentEstimate.exact
+      ? 'Lossless copy — output size ≈ the combined size of the input clips.'
+      : 'Re-encoded size is an estimate; the actual size depends on the footage.';
+
   badge.hidden = false;
   if (plan.pureCopy) {
     badge.className = 'badge ok';
@@ -299,7 +372,7 @@ function updateSummary() {
 }
 
 // Enable/disable controls based on current state.
-function updateMergeControls() {
+function updateMergeControls(): void {
   const has = clips.length > 0;
 
   // The toggle now means "force re-encode everything" (override keep-lossless).
@@ -312,28 +385,27 @@ function updateMergeControls() {
   el.outputBtn.disabled = !has || merging;
   el.keepCompatBtn.disabled = merging;
   el.openBtn.disabled = merging;
-  if (el.musicToggle) el.musicToggle.disabled = !has || merging || musicFetching;
-  if (el.musicVibe) el.musicVibe.disabled = !has || merging || musicFetching;
+  el.musicToggle.disabled = !has || merging || musicFetching;
+  el.musicVibe.disabled = !has || merging || musicFetching;
 }
 
 // ---------------------------------------------------------------------------
 // Escaping
 // ---------------------------------------------------------------------------
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-  ));
+const HTML_ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+function escapeHtml(s: unknown): string {
+  return String(s).replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
 }
-function escapeAttr(s) { return escapeHtml(s).replace(/'/g, '&#39;'); }
+function escapeAttr(s: unknown): string { return escapeHtml(s).replace(/'/g, '&#39;'); }
 
 // ---------------------------------------------------------------------------
 // Drag & drop reordering (works from both the list and the timeline)
 // ---------------------------------------------------------------------------
-let dragId = null;
+let dragId: number | null = null;
 
-function indexOfId(id) { return clips.findIndex((c) => c.id === id); }
+function indexOfId(id: number): number { return clips.findIndex((c) => c.id === id); }
 
-function moveClip(fromId, toId, after) {
+function moveClip(fromId: number, toId: number, after: boolean): void {
   const from = indexOfId(fromId);
   let to = indexOfId(toId);
   if (from === -1 || to === -1 || fromId === toId) return;
@@ -345,26 +417,28 @@ function moveClip(fromId, toId, after) {
   renderAll();
 }
 
-function makeDraggable(node, container) {
-  node.addEventListener('dragstart', (e) => {
+function makeDraggable(node: HTMLElement, container: HTMLElement): void {
+  node.addEventListener('dragstart', (e: DragEvent) => {
     dragId = Number(node.dataset.id);
     node.classList.add('dragging');
-    e.dataTransfer.effectAllowed = 'move';
-    try { e.dataTransfer.setData('text/plain', String(dragId)); } catch (_) {}
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', String(dragId)); } catch { /* ignore */ }
+    }
   });
   node.addEventListener('dragend', () => {
     dragId = null;
     node.classList.remove('dragging');
     container.querySelectorAll('.drop-target').forEach((n) => n.classList.remove('drop-target'));
   });
-  node.addEventListener('dragover', (e) => {
+  node.addEventListener('dragover', (e: DragEvent) => {
     e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
     container.querySelectorAll('.drop-target').forEach((n) => n.classList.remove('drop-target'));
     if (Number(node.dataset.id) !== dragId) node.classList.add('drop-target');
   });
   node.addEventListener('dragleave', () => node.classList.remove('drop-target'));
-  node.addEventListener('drop', (e) => {
+  node.addEventListener('drop', (e: DragEvent) => {
     e.preventDefault();
     node.classList.remove('drop-target');
     const targetId = Number(node.dataset.id);
@@ -379,23 +453,25 @@ function makeDraggable(node, container) {
   });
 }
 
-function attachRowEvents() {
-  el.clipList.querySelectorAll('.clip').forEach((li) => {
+function attachRowEvents(): void {
+  el.clipList.querySelectorAll<HTMLLIElement>('.clip').forEach((li) => {
     makeDraggable(li, el.clipList);
     li.addEventListener('click', (e) => {
-      if (e.target.closest('.remove-btn')) return;
+      if ((e.target as HTMLElement).closest('.remove-btn')) return;
       selectClip(Number(li.dataset.id));
     });
-    const rm = li.querySelector('.remove-btn');
-    rm.addEventListener('click', (e) => {
-      e.stopPropagation();
-      removeClip(Number(rm.dataset.remove));
-    });
+    const rm = li.querySelector<HTMLButtonElement>('.remove-btn');
+    if (rm) {
+      rm.addEventListener('click', (e) => {
+        e.stopPropagation();
+        removeClip(Number(rm.dataset.remove));
+      });
+    }
   });
 }
 
-function attachTimelineEvents() {
-  el.timeline.querySelectorAll('.tl-clip').forEach((div) => {
+function attachTimelineEvents(): void {
+  el.timeline.querySelectorAll<HTMLElement>('.tl-clip').forEach((div) => {
     makeDraggable(div, el.timeline);
     div.addEventListener('click', () => selectClip(Number(div.dataset.id)));
   });
@@ -404,18 +480,18 @@ function attachTimelineEvents() {
 // ---------------------------------------------------------------------------
 // Selection + preview
 // ---------------------------------------------------------------------------
-async function selectClip(id) {
+async function selectClip(id: number): Promise<void> {
   selectedId = id;
   const c = clips.find((x) => x.id === id);
   renderList();
   if (!c) return;
 
   el.previewPane.hidden = false;
-  document.querySelector('.body').classList.add('has-preview');
+  document.querySelector('.body')?.classList.add('has-preview');
 
   try {
     el.previewVideo.src = await window.api.fileUrl(c.path);
-  } catch (_) { /* preview is best-effort */ }
+  } catch { /* preview is best-effort */ }
 
   el.previewInfo.innerHTML = `
     <div><b>${escapeHtml(c.name)}</b></div>
@@ -426,12 +502,12 @@ async function selectClip(id) {
   `;
 }
 
-function removeClip(id) {
+function removeClip(id: number): void {
   clips = clips.filter((c) => c.id !== id);
   if (selectedId === id) {
     selectedId = null;
     el.previewPane.hidden = true;
-    document.querySelector('.body').classList.remove('has-preview');
+    document.querySelector('.body')?.classList.remove('has-preview');
     el.previewVideo.removeAttribute('src');
   }
   renderAll();
@@ -440,18 +516,18 @@ function removeClip(id) {
 // ---------------------------------------------------------------------------
 // Sorting
 // ---------------------------------------------------------------------------
-function setSortMode(mode) {
+function setSortMode(mode: SortModeUI): void {
   sortMode = mode;
-  const customOpt = el.sortSelect.querySelector('option[value="custom"]');
+  const customOpt = el.sortSelect.querySelector<HTMLOptionElement>('option[value="custom"]');
   if (mode === 'custom') {
-    customOpt.hidden = false;
+    if (customOpt) customOpt.hidden = false;
     el.sortSelect.value = 'custom';
   } else {
     el.sortSelect.value = mode;
   }
 }
 
-function applySort(mode) {
+function applySort(mode: SortModeUI): void {
   setSortMode(mode);
   if (mode === 'date-asc') clips.sort((a, b) => (a.sortTime - b.sortTime) || a.name.localeCompare(b.name));
   else if (mode === 'date-desc') clips.sort((a, b) => (b.sortTime - a.sortTime) || a.name.localeCompare(b.name));
@@ -462,7 +538,7 @@ function applySort(mode) {
 
 // Randomize the clip order (Fisher–Yates). Result is a "custom" order that can
 // still be hand-tweaked by dragging afterwards. Click again to re-shuffle.
-function shuffleClips() {
+function shuffleClips(): void {
   if (merging || clips.length < 2) return;
   for (let i = clips.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -474,7 +550,7 @@ function shuffleClips() {
 
 // Drop the clips whose format differs from the majority so the remaining set
 // can be merged losslessly (no re-encode needed).
-function keepCompatibleOnly() {
+function keepCompatibleOnly(): void {
   if (merging || clips.length < 2) return;
   const major = majorityKey();
   const removed = clips.filter((c) => c.compatKey !== major);
@@ -483,7 +559,7 @@ function keepCompatibleOnly() {
   if (removed.some((c) => c.id === selectedId)) {
     selectedId = null;
     el.previewPane.hidden = true;
-    document.querySelector('.body').classList.remove('has-preview');
+    document.querySelector('.body')?.classList.remove('has-preview');
     el.previewVideo.removeAttribute('src');
   }
   renderAll();
@@ -493,13 +569,13 @@ function keepCompatibleOnly() {
 // ---------------------------------------------------------------------------
 // Scanning
 // ---------------------------------------------------------------------------
-async function openFolder() {
+async function openFolder(): Promise<void> {
   const dir = await window.api.openFolder();
   if (!dir) return;
   await scan(dir);
 }
 
-async function scan(dir) {
+async function scan(dir: string): Promise<void> {
   folderPath = dir;
   el.folderPath.textContent = dir;
   outputPath = null;
@@ -513,14 +589,14 @@ async function scan(dir) {
   el.loadingState.hidden = false;
   el.loadingText.textContent = 'Scanning videos and reading metadata…';
 
-  let result;
+  let result: ScanResult;
   try {
     result = await window.api.scanDirectory(dir);
   } catch (e) {
     el.loadingState.hidden = true;
     el.emptyState.hidden = false;
-    setStatus('Could not read that folder: ' + (e.message || e), 'error');
-    window.api.log('error', 'Scan failed (renderer): ' + (e.message || e));
+    setStatus('Could not read that folder: ' + errText(e), 'error');
+    window.api.log('error', 'Scan failed (renderer): ' + errText(e));
     return;
   }
 
@@ -529,7 +605,7 @@ async function scan(dir) {
 
   if (clips.length === 0) {
     el.emptyState.hidden = false;
-    const st = result.stats || {};
+    const st = result.stats;
     const msg = !st.matched
       ? 'No video files found in that folder. (Subfolders are not scanned.)'
       : `Found ${st.matched} file(s), but none had a readable video stream. See Settings → Open log file for details.`;
@@ -542,7 +618,7 @@ async function scan(dir) {
   el.listContainer.hidden = false;
   selectedId = null;
   el.previewPane.hidden = true;
-  document.querySelector('.body').classList.remove('has-preview');
+  document.querySelector('.body')?.classList.remove('has-preview');
   setSortMode('date-asc');
   renderAll();
   setStatus(`Loaded ${clips.length} clip${clips.length > 1 ? 's' : ''} — drag to reorder, then click Merge ▶ to create your video.`);
@@ -554,7 +630,7 @@ async function scan(dir) {
 // ---------------------------------------------------------------------------
 // Merging
 // ---------------------------------------------------------------------------
-async function startMerge() {
+async function startMerge(): Promise<void> {
   if (clips.length === 0 || merging) return;
   const forceReencode = el.reencodeToggle.checked;
   const plan = outputPlan();
@@ -610,7 +686,7 @@ async function startMerge() {
         }
       }
     }
-  } catch (_) { /* if the space check fails for any reason, don't block the merge */ }
+  } catch { /* if the space check fails for any reason, don't block the merge */ }
 
   merging = true;
   mergeStartTime = Date.now();
@@ -626,7 +702,7 @@ async function startMerge() {
     : `Encoding to ${plan.t.W}×${plan.t.H} @ ${plan.t.F}fps · ${plan.codec === 'hevc' ? 'HEVC' : 'H.264'} (${plan.encLabel})${musicNote}… this can take a while.`);
   updateMergeControls();
 
-  const payload = {
+  const payload: MergePayload = {
     outputPath: out,
     forceReencode,
     clips: clips.map((c) => ({
@@ -661,15 +737,15 @@ async function startMerge() {
       setStatus('Merge canceled.', 'error');
     } else {
       setProgress(100);
-      const musicNote = res.musicFailed
+      const note = res.musicFailed
         ? ' (background music could not be added, so it was saved without music)'
         : (res.music ? ' with background music' : '');
-      setStatus(`Done — saved to ${res.outputPath}${musicNote}`, 'success');
+      setStatus(`Done — saved to ${res.outputPath}${note}`, 'success');
       el.showBtn.hidden = false;
     }
   } catch (e) {
-    setStatus('Merge failed: ' + (e.message || e), 'error');
-    window.api.log('error', 'Merge failed (renderer): ' + (e.message || e));
+    setStatus('Merge failed: ' + errText(e), 'error');
+    window.api.log('error', 'Merge failed (renderer): ' + errText(e));
   } finally {
     merging = false;
     el.cancelBtn.hidden = true;
@@ -679,42 +755,42 @@ async function startMerge() {
   }
 }
 
-function resetMergeUi() {
+function resetMergeUi(): void {
   el.progressWrap.hidden = true;
   el.showBtn.hidden = true;
   setProgress(0);
 }
 
-function setProgress(pct) {
+function setProgress(pct: number): void {
   el.progressBar.style.width = Math.max(0, Math.min(100, pct)) + '%';
   el.progressText.textContent = Math.round(pct) + '%';
 }
 
-function setStatus(msg, kind) {
+function setStatus(msg: string, kind?: string): void {
   lastStatusText = msg || '';
   el.statusMsg.textContent = msg;
   el.statusMsg.className = 'status-msg' + (kind ? ' ' + kind : '');
-  if (el.copyStatusBtn) el.copyStatusBtn.hidden = !msg;
+  el.copyStatusBtn.hidden = !msg;
 }
 
-async function copyStatus() {
+async function copyStatus(): Promise<void> {
   try {
     await window.api.copyText(lastStatusText);
     const original = el.copyStatusBtn.textContent;
     el.copyStatusBtn.textContent = '✓ Copied';
     setTimeout(() => { el.copyStatusBtn.textContent = original; }, 1200);
-  } catch (_) { /* ignore */ }
+  } catch { /* ignore */ }
 }
 
 // ---------------------------------------------------------------------------
 // Merge progress display
 // ---------------------------------------------------------------------------
-function fmtClock(ms) {
+function fmtClock(ms: number): string {
   try { return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
-  catch (_) { return ''; }
+  catch { return ''; }
 }
 
-function fmtRemaining(ms) {
+function fmtRemaining(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
@@ -722,8 +798,8 @@ function fmtRemaining(ms) {
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
-function mergeProgressText(p) {
-  let action;
+function mergeProgressText(p: Progress): string {
+  let action: string;
   if (p.phase === 'music-prep') {
     action = 'Preparing background music (crossfading tracks into a seamless loop)…';
   } else if (p.phase === 'music') {
@@ -738,8 +814,8 @@ function mergeProgressText(p) {
   }
 
   const stats = [`${Math.round(p.percent || 0)}% overall`];
-  if (p.speed > 0) stats.push(`${p.speed.toFixed(1)}× speed`);
-  if (p.fps > 0) stats.push(`${Math.round(p.fps)} fps`);
+  if (p.speed && p.speed > 0) stats.push(`${p.speed.toFixed(1)}× speed`);
+  if (p.fps && p.fps > 0) stats.push(`${Math.round(p.fps)} fps`);
   if (mergeStartTime && p.percent > 1.5) {
     const elapsed = Date.now() - mergeStartTime;
     const remaining = elapsed * (100 - p.percent) / p.percent;
@@ -752,22 +828,21 @@ function mergeProgressText(p) {
 // ---------------------------------------------------------------------------
 // Output location
 // ---------------------------------------------------------------------------
-function suggestedOutputName() {
+function suggestedOutputName(): string {
   const base = (folderPath ? folderPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() : 'merged') || 'merged';
   const plan = outputPlan();
   const ext = (plan.pureCopy && !el.reencodeToggle.checked) ? ((clips[0] && clips[0].ext) || 'mp4') : 'mp4';
   return `${base}_merged.${ext}`;
 }
 
-async function chooseOutput() {
+async function chooseOutput(): Promise<void> {
   const picked = await window.api.saveOutput(suggestedOutputName());
   if (!picked) return;
   outputPath = picked;
   updateOutputDisplay();
 }
 
-function updateOutputDisplay() {
-  if (!el.outputPath) return;
+function updateOutputDisplay(): void {
   if (outputPath) {
     el.outputPath.textContent = outputPath;
     el.outputPath.title = outputPath;
@@ -783,8 +858,7 @@ function updateOutputDisplay() {
 // Background music
 // ---------------------------------------------------------------------------
 // Populate the vibe dropdown from the catalog in the main process.
-async function populateVibes() {
-  if (!el.musicVibe) return;
+async function populateVibes(): Promise<void> {
   try {
     const vibes = await window.api.getMusicVibes();
     el.musicVibe.innerHTML = '';
@@ -798,10 +872,10 @@ async function populateVibes() {
       el.musicVibe.appendChild(opt);
     });
     el.musicVibe.value = settings.musicVibe || 'mix';
-  } catch (_) { /* ignore */ }
+  } catch { /* ignore */ }
 }
 
-async function onMusicToggle() {
+async function onMusicToggle(): Promise<void> {
   musicEnabled = el.musicToggle.checked;
   if (musicEnabled && (!musicTracks || !musicTracks.trackPaths.length)) {
     await fetchMusicTracks();
@@ -813,9 +887,9 @@ async function onMusicToggle() {
 
 // Switching vibe persists the choice and, if music is on, fetches the new vibe
 // (instant if it was downloaded before — each vibe has its own cache).
-async function onMusicVibeChange() {
+async function onMusicVibeChange(): Promise<void> {
   settings.musicVibe = el.musicVibe.value;
-  try { await window.api.setSettings({ musicVibe: settings.musicVibe }); } catch (_) { /* ignore */ }
+  try { await window.api.setSettings({ musicVibe: settings.musicVibe }); } catch { /* ignore */ }
   if (musicEnabled) {
     musicTracks = null; // force a refetch for the newly selected vibe
     await fetchMusicTracks();
@@ -824,7 +898,7 @@ async function onMusicVibeChange() {
 
 // Fetch (and cache) the royalty-free track pool for the selected vibe. Safe to
 // call repeatedly — the main process reuses anything already downloaded.
-async function fetchMusicTracks() {
+async function fetchMusicTracks(): Promise<void> {
   if (musicFetching) return;
   musicFetching = true;
   el.musicCreditsBtn.hidden = true;
@@ -838,17 +912,16 @@ async function fetchMusicTracks() {
   } catch (e) {
     musicTracks = null;
     musicEnabled = false;
-    if (el.musicToggle) el.musicToggle.checked = false;
-    el.musicStatus.textContent = '⚠ Could not fetch music (offline?). ' + (e.message || e);
-    window.api.log('error', 'Music fetch failed (renderer): ' + (e.message || e));
+    el.musicToggle.checked = false;
+    el.musicStatus.textContent = '⚠ Could not fetch music (offline?). ' + errText(e);
+    window.api.log('error', 'Music fetch failed (renderer): ' + errText(e));
   } finally {
     musicFetching = false;
     updateMergeControls();
   }
 }
 
-function updateMusicStatus() {
-  if (!el.musicStatus) return;
+function updateMusicStatus(): void {
   if (!musicEnabled) {
     el.musicStatus.textContent = '';
     el.musicCreditsBtn.hidden = true;
@@ -865,7 +938,7 @@ function updateMusicStatus() {
   }
 }
 
-function showMusicCredits() {
+function showMusicCredits(): void {
   if (!musicTracks || !musicTracks.credits || !musicTracks.credits.length) return;
   const lines = musicTracks.credits.map((c) => `• ${c.creator} — ${c.album} (${c.license})`);
   const text =
@@ -874,28 +947,27 @@ function showMusicCredits() {
   setStatus(text);
 }
 
-function refreshMusicCacheInfo() {
-  if (!el.musicCacheText) return;
+function refreshMusicCacheInfo(): void {
   window.api.getMusicCacheInfo().then((info) => {
     if (!info || !info.count) { el.musicCacheText.textContent = 'No music downloaded yet.'; return; }
     el.musicCacheText.textContent = `${info.count} track${info.count > 1 ? 's' : ''} cached · ${fmtSize(info.bytes)}`;
   }).catch(() => {});
 }
 
-async function clearMusicDownloads() {
+async function clearMusicDownloads(): Promise<void> {
   try {
     await window.api.clearMusicCache();
     musicTracks = null;
-    if (musicEnabled && el.musicToggle) { el.musicToggle.checked = false; musicEnabled = false; }
+    if (musicEnabled) { el.musicToggle.checked = false; musicEnabled = false; }
     updateMusicStatus();
     refreshMusicCacheInfo();
-  } catch (_) { /* ignore */ }
+  } catch { /* ignore */ }
 }
 
 // ---------------------------------------------------------------------------
 // Auto-update banner
 // ---------------------------------------------------------------------------
-function handleUpdateStatus(p) {
+function handleUpdateStatus(p: UpdateStatus): void {
   if (!p) return;
   updateSettingsStatus(p);
   const banner = el.updateBanner;
@@ -927,23 +999,23 @@ function handleUpdateStatus(p) {
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
-async function openSettings() {
+async function openSettings(): Promise<void> {
   el.settingsOverlay.hidden = false;
   try {
     el.settingsVersion.textContent = 'v' + (await window.api.getVersion());
-  } catch (_) {
+  } catch {
     el.settingsVersion.textContent = '—';
   }
   try {
     el.logPathText.textContent = await window.api.getLogPath();
-  } catch (_) { /* ignore */ }
+  } catch { /* ignore */ }
 }
 
-function closeSettings() {
+function closeSettings(): void {
   el.settingsOverlay.hidden = true;
 }
 
-async function checkForUpdatesManual() {
+async function checkForUpdatesManual(): Promise<void> {
   el.checkUpdatesBtn.disabled = true;
   el.updateStatusText.textContent = 'Checking for updates…';
   await window.api.checkForUpdate();
@@ -951,8 +1023,7 @@ async function checkForUpdatesManual() {
 
 // Reflect update status inside the Settings dialog. The top banner handles the
 // at-a-glance prompt; this gives explicit feedback for the manual check.
-function updateSettingsStatus(p) {
-  if (!el.updateStatusText) return;
+function updateSettingsStatus(p: UpdateStatus): void {
   const ver = p && p.version ? 'v' + p.version : '';
   switch (p && p.state) {
     case 'checking':
@@ -985,45 +1056,44 @@ function updateSettingsStatus(p) {
 // ---------------------------------------------------------------------------
 // Output & encoding settings
 // ---------------------------------------------------------------------------
-async function loadSettingsIntoUi() {
+async function loadSettingsIntoUi(): Promise<void> {
   try {
     settings = { ...settings, ...(await window.api.getSettings()) };
     encoderInfo = (await window.api.getEncoderInfo()) || encoderInfo;
-  } catch (_) { /* ignore */ }
+  } catch { /* ignore */ }
   el.setResolution.value = settings.resolution || 'auto';
   el.setFps.value = settings.fps || 'auto';
   el.setEncoder.value = settings.encoder || 'auto';
   el.setCodec.value = settings.codec || 'h264';
   el.setQuality.value = settings.quality || 'near';
-  if (el.setMusicCrossfade) el.setMusicCrossfade.value = String(settings.musicCrossfade ?? 4);
-  if (el.setMusicFadeOut) el.setMusicFadeOut.value = String(settings.musicFadeOut ?? 5);
-  if (el.setMusicVolume) el.setMusicVolume.value = String(settings.musicVolume ?? 100);
+  el.setMusicCrossfade.value = String(settings.musicCrossfade ?? 4);
+  el.setMusicFadeOut.value = String(settings.musicFadeOut ?? 5);
+  el.setMusicVolume.value = String(settings.musicVolume ?? 100);
   await populateVibes();
   updateEncoderInfoLabel();
   refreshMusicCacheInfo();
   updateSummary();
 }
 
-async function onSettingChange() {
+async function onSettingChange(): Promise<void> {
   settings = {
     ...settings, // keep values not represented by a settings-dialog control (e.g. musicVibe)
-    resolution: el.setResolution.value,
-    fps: el.setFps.value,
-    encoder: el.setEncoder.value,
-    codec: el.setCodec.value,
-    quality: el.setQuality.value,
+    resolution: el.setResolution.value as ResolutionPref,
+    fps: el.setFps.value as FpsPref,
+    encoder: el.setEncoder.value as EncoderPref,
+    codec: el.setCodec.value as Codec,
+    quality: el.setQuality.value as Quality,
     musicCrossfade: parseInt(el.setMusicCrossfade.value, 10),
     musicFadeOut: parseInt(el.setMusicFadeOut.value, 10),
     musicVolume: parseInt(el.setMusicVolume.value, 10)
   };
   updateEncoderInfoLabel();
   updateSummary();
-  try { await window.api.setSettings(settings); } catch (_) { /* ignore */ }
+  try { await window.api.setSettings(settings); } catch { /* ignore */ }
 }
 
-function updateEncoderInfoLabel() {
-  if (!el.encoderInfo) return;
-  const parts = [];
+function updateEncoderInfoLabel(): void {
+  const parts: string[] = [];
   if (encoderInfo.h264_nvenc) parts.push('H.264');
   if (encoderInfo.hevc_nvenc) parts.push('HEVC');
   el.encoderInfo.textContent = parts.length
@@ -1034,72 +1104,72 @@ function updateEncoderInfoLabel() {
 // ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
-function init() {
-  el.openBtn = $('openBtn');
-  el.openBtn2 = $('openBtn2');
-  el.sortSelect = $('sortSelect');
-  el.shuffleBtn = $('shuffleBtn');
+function init(): void {
+  el.openBtn = $<HTMLButtonElement>('openBtn');
+  el.openBtn2 = $<HTMLButtonElement>('openBtn2');
+  el.sortSelect = $<HTMLSelectElement>('sortSelect');
+  el.shuffleBtn = $<HTMLButtonElement>('shuffleBtn');
   el.folderPath = $('folderPath');
   el.emptyState = $('emptyState');
   el.listContainer = $('listContainer');
   el.loadingState = $('loadingState');
   el.loadingText = $('loadingText');
-  el.clipList = $('clipList');
+  el.clipList = $<HTMLUListElement>('clipList');
   el.clipCount = $('clipCount');
   el.previewPane = $('previewPane');
-  el.previewVideo = $('previewVideo');
+  el.previewVideo = $<HTMLVideoElement>('previewVideo');
   el.previewInfo = $('previewInfo');
   el.timeline = $('timeline');
   el.totalDuration = $('totalDuration');
   el.compatBadge = $('compatBadge');
-  el.reencodeToggle = $('reencodeToggle');
+  el.reencodeToggle = $<HTMLInputElement>('reencodeToggle');
   el.reencodeLabel = $('reencodeLabel');
-  el.musicToggle = $('musicToggle');
-  el.musicVibe = $('musicVibe');
+  el.musicToggle = $<HTMLInputElement>('musicToggle');
+  el.musicVibe = $<HTMLSelectElement>('musicVibe');
   el.musicStatus = $('musicStatus');
-  el.musicCreditsBtn = $('musicCreditsBtn');
+  el.musicCreditsBtn = $<HTMLButtonElement>('musicCreditsBtn');
   el.statusMsg = $('statusMsg');
-  el.copyStatusBtn = $('copyStatusBtn');
+  el.copyStatusBtn = $<HTMLButtonElement>('copyStatusBtn');
   el.progressWrap = $('progressWrap');
   el.progressBar = $('progressBar');
   el.progressText = $('progressText');
-  el.mergeBtn = $('mergeBtn');
-  el.cancelBtn = $('cancelBtn');
-  el.showBtn = $('showBtn');
-  el.outputBtn = $('outputBtn');
+  el.mergeBtn = $<HTMLButtonElement>('mergeBtn');
+  el.cancelBtn = $<HTMLButtonElement>('cancelBtn');
+  el.showBtn = $<HTMLButtonElement>('showBtn');
+  el.outputBtn = $<HTMLButtonElement>('outputBtn');
   el.outputPath = $('outputPath');
-  el.keepCompatBtn = $('keepCompatBtn');
+  el.keepCompatBtn = $<HTMLButtonElement>('keepCompatBtn');
   el.updateBanner = $('updateBanner');
   el.updateText = $('updateText');
-  el.updateActionBtn = $('updateActionBtn');
-  el.updateDismiss = $('updateDismiss');
-  el.settingsBtn = $('settingsBtn');
+  el.updateActionBtn = $<HTMLButtonElement>('updateActionBtn');
+  el.updateDismiss = $<HTMLButtonElement>('updateDismiss');
+  el.settingsBtn = $<HTMLButtonElement>('settingsBtn');
   el.settingsOverlay = $('settingsOverlay');
-  el.settingsClose = $('settingsClose');
+  el.settingsClose = $<HTMLButtonElement>('settingsClose');
   el.settingsVersion = $('settingsVersion');
-  el.checkUpdatesBtn = $('checkUpdatesBtn');
+  el.checkUpdatesBtn = $<HTMLButtonElement>('checkUpdatesBtn');
   el.updateStatusText = $('updateStatusText');
-  el.openReleasesBtn = $('openReleasesBtn');
-  el.openLogBtn = $('openLogBtn');
-  el.openLogFolderBtn = $('openLogFolderBtn');
+  el.openReleasesBtn = $<HTMLButtonElement>('openReleasesBtn');
+  el.openLogBtn = $<HTMLButtonElement>('openLogBtn');
+  el.openLogFolderBtn = $<HTMLButtonElement>('openLogFolderBtn');
   el.logPathText = $('logPathText');
   el.outputInfo = $('outputInfo');
-  el.setResolution = $('setResolution');
-  el.setFps = $('setFps');
-  el.setEncoder = $('setEncoder');
-  el.setCodec = $('setCodec');
-  el.setQuality = $('setQuality');
+  el.setResolution = $<HTMLSelectElement>('setResolution');
+  el.setFps = $<HTMLSelectElement>('setFps');
+  el.setEncoder = $<HTMLSelectElement>('setEncoder');
+  el.setCodec = $<HTMLSelectElement>('setCodec');
+  el.setQuality = $<HTMLSelectElement>('setQuality');
   el.encoderInfo = $('encoderInfo');
-  el.setMusicCrossfade = $('setMusicCrossfade');
-  el.setMusicFadeOut = $('setMusicFadeOut');
-  el.setMusicVolume = $('setMusicVolume');
+  el.setMusicCrossfade = $<HTMLSelectElement>('setMusicCrossfade');
+  el.setMusicFadeOut = $<HTMLSelectElement>('setMusicFadeOut');
+  el.setMusicVolume = $<HTMLSelectElement>('setMusicVolume');
   el.musicCacheText = $('musicCacheText');
-  el.clearMusicBtn = $('clearMusicBtn');
-  el.browseMusicBtn = $('browseMusicBtn');
+  el.clearMusicBtn = $<HTMLButtonElement>('clearMusicBtn');
+  el.browseMusicBtn = $<HTMLButtonElement>('browseMusicBtn');
 
   el.openBtn.addEventListener('click', openFolder);
   el.openBtn2.addEventListener('click', openFolder);
-  el.sortSelect.addEventListener('change', (e) => applySort(e.target.value));
+  el.sortSelect.addEventListener('change', (e) => applySort((e.target as HTMLSelectElement).value as SortModeUI));
   el.shuffleBtn.addEventListener('click', shuffleClips);
   el.mergeBtn.addEventListener('click', startMerge);
   el.cancelBtn.addEventListener('click', () => window.api.cancelMerge());
@@ -1122,8 +1192,9 @@ function init() {
   el.openLogBtn.addEventListener('click', () => window.api.openLogFile());
   el.openLogFolderBtn.addEventListener('click', () => window.api.revealLogFile());
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !el.settingsOverlay.hidden) closeSettings(); });
-  ['setResolution', 'setFps', 'setEncoder', 'setCodec', 'setQuality',
-    'setMusicCrossfade', 'setMusicFadeOut', 'setMusicVolume'].forEach((id) => {
+  const settingIds: (keyof Elements)[] = ['setResolution', 'setFps', 'setEncoder', 'setCodec', 'setQuality',
+    'setMusicCrossfade', 'setMusicFadeOut', 'setMusicVolume'];
+  settingIds.forEach((id) => {
     el[id].addEventListener('change', onSettingChange);
   });
 
@@ -1139,10 +1210,11 @@ function init() {
   window.api.onMergeProgress((p) => {
     if (typeof p.percent === 'number') setProgress(p.percent);
     if (!merging) return;
-    el.statusMsg.textContent = mergeProgressText(p);
+    const txt = mergeProgressText(p);
+    el.statusMsg.textContent = txt;
     el.statusMsg.className = 'status-msg';
     el.copyStatusBtn.hidden = true;
-    lastStatusText = el.statusMsg.textContent;
+    lastStatusText = txt;
   });
 
   // Background-music download progress.
@@ -1164,13 +1236,13 @@ function init() {
 }
 
 // Update just the thumbnail images for a clip (avoids a full re-render flicker).
-function updateThumb(c) {
-  document.querySelectorAll(`.clip[data-id="${c.id}"] .thumb`).forEach((t) => {
+function updateThumb(c: Clip): void {
+  document.querySelectorAll<HTMLElement>(`.clip[data-id="${c.id}"] .thumb`).forEach((t) => {
     t.classList.remove('loading');
     t.textContent = '';
     t.style.backgroundImage = `url('${c.thumb}')`;
   });
-  document.querySelectorAll(`.tl-clip[data-id="${c.id}"]`).forEach((t) => {
+  document.querySelectorAll<HTMLElement>(`.tl-clip[data-id="${c.id}"]`).forEach((t) => {
     t.style.backgroundImage = `url('${c.thumb}')`;
   });
 }

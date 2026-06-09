@@ -1,10 +1,8 @@
-'use strict';
-
-const { test } = require('node:test');
-const assert = require('node:assert/strict');
-const {
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
   isVideoFile, parseFilenameDate, resolveCaptureTime, compatKey, sortClips
-} = require('../src/metadata');
+} from '../src/metadata';
 
 test('isVideoFile detects video extensions case-insensitively', () => {
   assert.equal(isVideoFile('clip.mp4'), true);

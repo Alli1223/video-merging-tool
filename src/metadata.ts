@@ -1,24 +1,22 @@
-'use strict';
-
 // Pure helpers for detecting video files, deriving capture time, computing
 // stream-compatibility keys and ordering clips. No FFmpeg / filesystem access
 // lives here so the logic can be unit-tested in isolation.
 
-const path = require('path');
+import path from 'path';
 
-const VIDEO_EXTS = new Set([
+export const VIDEO_EXTS = new Set<string>([
   '.mp4', '.mov', '.mkv', '.avi', '.m4v', '.webm', '.mts', '.m2ts', '.ts',
   '.wmv', '.flv', '.3gp', '.3g2', '.mpg', '.mpeg', '.mpe', '.vob', '.ogv',
   '.mxf', '.divx', '.asf', '.f4v'
 ]);
 
-function isVideoFile(name) {
+export function isVideoFile(name: string): boolean {
   return VIDEO_EXTS.has(path.extname(name).toLowerCase());
 }
 
 // Pull a timestamp out of common camera/phone filename patterns, e.g.
 // VID_20210115_143052.mp4, 2021-01-15 14.30.52.mov, 20210115143052.mkv.
-function parseFilenameDate(name) {
+export function parseFilenameDate(name: string): number | null {
   const m = name.match(
     /(19\d\d|20\d\d)[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])(?:[-_ tT.]?([01]\d|2[0-3])[-_.]?([0-5]\d)[-_.]?([0-5]\d))?/
   );
@@ -29,9 +27,21 @@ function parseFilenameDate(name) {
   return Number.isNaN(t) ? null : t;
 }
 
+interface CaptureMeta {
+  creationTimeTag?: string | null;
+}
+interface CaptureStat {
+  birthtimeMs: number;
+  mtimeMs: number;
+}
+
 // Decide which timestamp to sort a clip by, preferring the most trustworthy
 // source: embedded metadata > filename pattern > filesystem created/modified.
-function resolveCaptureTime(meta, stat, name) {
+export function resolveCaptureTime(
+  meta: CaptureMeta,
+  stat: CaptureStat,
+  name: string
+): { time: number; source: TimeSource } {
   const tag = meta.creationTimeTag ? Date.parse(meta.creationTimeTag) : NaN;
   if (!Number.isNaN(tag)) return { time: tag, source: 'metadata' };
 
@@ -46,9 +56,20 @@ function resolveCaptureTime(meta, stat, name) {
   return { time: mod, source: 'modified' };
 }
 
+interface CompatMeta {
+  vcodec: string | null;
+  width: number;
+  height: number;
+  pixfmt: string | null;
+  fps: number;
+  acodec: string | null;
+  sampleRate: number;
+  channels: number;
+}
+
 // A key that is identical for clips that can be losslessly stream-copied
 // together (same codecs and parameters). fps is rounded so 29.97 ≈ 30.
-function compatKey(meta) {
+export function compatKey(meta: CompatMeta): string {
   return [
     meta.vcodec || 'novideo',
     `${meta.width}x${meta.height}`,
@@ -60,7 +81,12 @@ function compatKey(meta) {
   ].join('|');
 }
 
-const comparators = {
+interface SortableClip {
+  name: string;
+  sortTime: number;
+}
+
+export const comparators: Record<SortMode, (a: SortableClip, b: SortableClip) => number> = {
   'date-asc': (a, b) => (a.sortTime - b.sortTime) || a.name.localeCompare(b.name),
   'date-desc': (a, b) => (b.sortTime - a.sortTime) || a.name.localeCompare(b.name),
   'name-asc': (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }),
@@ -68,19 +94,9 @@ const comparators = {
 };
 
 // Return a new, sorted copy of the clips for the given mode (input untouched).
-function sortClips(clips, mode) {
+export function sortClips<T extends SortableClip>(clips: T[], mode: SortMode): T[] {
   const out = clips.slice();
   const cmp = comparators[mode];
   if (cmp) out.sort(cmp);
   return out;
 }
-
-module.exports = {
-  VIDEO_EXTS,
-  isVideoFile,
-  parseFilenameDate,
-  resolveCaptureTime,
-  compatKey,
-  comparators,
-  sortClips
-};

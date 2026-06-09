@@ -1,12 +1,10 @@
-'use strict';
-
 // Pure construction of FFmpeg argument lists and parsing of its progress
 // output. Kept free of child_process / filesystem so the (fiddly) filter-graph
 // logic can be unit-tested without ever launching FFmpeg.
 
-const path = require('path');
+import path from 'path';
 
-function parseFps(rate) {
+export function parseFps(rate: string | null | undefined): number {
   if (!rate || rate === '0/0') return 0;
   const [n, d] = String(rate).split('/').map(Number);
   if (!d) return n || 0;
@@ -14,35 +12,35 @@ function parseFps(rate) {
 }
 
 // Small numeric helpers used by the background-music argument builders.
-function num(v, fallback) {
+function num(v: unknown, fallback: number): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
-function clamp(v, lo, hi) {
+function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
 // Format a number for an ffmpeg filter argument: a few decimals, no trailing
 // zeros, never exponential (so e.g. 4, 3.5, 0.75 — not "4.0000000001").
-function fmtNum(v) {
+function fmtNum(v: unknown): string {
   return String(Math.round(num(v, 0) * 1000) / 1000);
 }
 
 // Escape a path for an ffmpeg concat-demuxer list file. Forward slashes work on
 // every platform; single quotes are escaped per the concat format rules.
-function concatPath(p) {
+export function concatPath(p: string): string {
   return p.replace(/\\/g, '/').replace(/'/g, "'\\''");
 }
 
-function concatListContent(clips) {
+export function concatListContent(clips: { path: string }[]): string {
   return clips.map((c) => `file '${concatPath(c.path)}'`).join('\n') + '\n';
 }
 
-function isMp4Like(outputPath) {
+export function isMp4Like(outputPath: string): boolean {
   return ['.mp4', '.mov', '.m4v'].includes(path.extname(outputPath).toLowerCase());
 }
 
 // Lossless path: stream-copy with the concat demuxer.
-function buildCopyArgs(listFile, outputPath) {
+export function buildCopyArgs(listFile: string, outputPath: string): string[] {
   const args = ['-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', '-map', '0'];
   if (isMp4Like(outputPath)) args.push('-movflags', '+faststart');
   args.push(outputPath);
@@ -51,7 +49,7 @@ function buildCopyArgs(listFile, outputPath) {
 
 // Target spec for re-encoding = the largest dimensions / highest frame rate
 // among the clips, snapped to even dimensions (required by yuv420p / x264).
-function reencodeTarget(clips) {
+export function reencodeTarget(clips: { width: number; height: number; fps: number }[]): Target {
   let W = 0, H = 0, F = 0;
   for (const c of clips) {
     if (c.width > W) W = c.width;
@@ -65,7 +63,7 @@ function reencodeTarget(clips) {
 }
 
 // Named output resolutions (16:9). Non-16:9 sources are letterboxed via pad.
-const RESOLUTIONS = {
+export const RESOLUTIONS: Record<string, { w: number; h: number }> = {
   2160: { w: 3840, h: 2160 },
   1440: { w: 2560, h: 1440 },
   1080: { w: 1920, h: 1080 },
@@ -74,11 +72,13 @@ const RESOLUTIONS = {
 
 // Resolve the output target {W,H,F} from the user's settings, falling back to
 // "auto" (match the largest dimensions / highest frame rate among the clips).
-function resolveTarget(clips, settings) {
-  settings = settings || {};
+export function resolveTarget(
+  clips: { width: number; height: number; fps: number }[],
+  settings: Partial<Settings> = {}
+): Target {
   const auto = reencodeTarget(clips);
   let { W, H, F } = auto;
-  const res = RESOLUTIONS[settings.resolution];
+  const res = settings.resolution ? RESOLUTIONS[settings.resolution] : undefined;
   if (res) { W = res.w; H = res.h; }
   if (settings.fps && settings.fps !== 'auto') {
     const f = parseInt(settings.fps, 10);
@@ -90,9 +90,9 @@ function resolveTarget(clips, settings) {
 // Video encoder arguments for the chosen codec / GPU / quality.
 //   codec: 'h264' | 'hevc'   useNvenc: boolean
 //   quality: 'lossless' | 'near' (visually lossless) | 'high' | 'balanced'
-function buildVideoEncodeArgs(codec, useNvenc, quality) {
+export function buildVideoEncodeArgs(codec: Codec, useNvenc: boolean, quality: Quality): string[] {
   const isHevc = codec === 'hevc';
-  const args = [];
+  const args: string[] = [];
   if (useNvenc) {
     args.push('-c:v', isHevc ? 'hevc_nvenc' : 'h264_nvenc');
     if (quality === 'lossless') {
@@ -123,7 +123,13 @@ function buildVideoEncodeArgs(codec, useNvenc, quality) {
 // and only the audio is normalized; otherwise the video is scaled/padded/fps-
 // converted and re-encoded. Audio is always normalized to AAC 48k stereo so all
 // segments can be concatenated by stream copy afterwards.
-function buildSegmentArgs(clip, target, encOpts, outPath, copyVideo) {
+export function buildSegmentArgs(
+  clip: { path: string; hasAudio: boolean; duration: number },
+  target: Target,
+  encOpts: EncodeOpts,
+  outPath: string,
+  copyVideo: boolean
+): string[] {
   const { W, H, F } = target;
   const args = ['-i', clip.path];
   const hasAudio = !!clip.hasAudio;
@@ -149,15 +155,20 @@ function buildSegmentArgs(clip, target, encOpts, outPath, copyVideo) {
 // filter, in one pass. Used when the per-segment join can't be stream-copied.
 // Clips without audio get a matched silent track so the filter sees uniform
 // streams. The (potentially huge) graph is written to filterScriptPath.
-function buildReencodeArgs(clips, outputPath, filterScriptPath, target, encOpts) {
+export function buildReencodeArgs(
+  clips: { path: string; width: number; height: number; fps: number; hasAudio: boolean; duration: number }[],
+  outputPath: string,
+  filterScriptPath: string,
+  target?: Target,
+  encOpts: EncodeOpts = { codec: 'h264', useNvenc: false, quality: 'near' }
+): { args: string[]; filterComplex: string } {
   const { W, H, F } = (target && target.W) ? target : reencodeTarget(clips);
-  encOpts = encOpts || { codec: 'h264', useNvenc: false, quality: 'near' };
   const anyAudio = clips.some((c) => c.hasAudio);
 
-  const inputArgs = [];
+  const inputArgs: string[] = [];
   let inputIndex = 0;
-  const videoInputIdx = [];
-  const audioInputIdx = [];
+  const videoInputIdx: number[] = [];
+  const audioInputIdx: number[] = [];
 
   clips.forEach((c) => {
     inputArgs.push('-i', c.path);
@@ -176,8 +187,8 @@ function buildReencodeArgs(clips, outputPath, filterScriptPath, target, encOpts)
     });
   }
 
-  const filters = [];
-  const concatLabels = [];
+  const filters: string[] = [];
+  const concatLabels: string[] = [];
   clips.forEach((c, i) => {
     filters.push(
       `[${videoInputIdx[i]}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,` +
@@ -222,8 +233,7 @@ function buildReencodeArgs(clips, outputPath, filterScriptPath, target, encOpts)
 
 // Clamp the music timing options to safe values for a video of totalDuration
 // seconds. Fades can't exceed half the video; crossfade/volume are bounded.
-function planMusic(totalDuration, opts) {
-  opts = opts || {};
+export function planMusic(totalDuration: number, opts: Partial<MusicOptions> = {}): MusicOptions {
   const T = totalDuration > 0 ? totalDuration : 0;
   const crossfade = clamp(num(opts.crossfade, 4), 0, 12);
   const fadeIn = clamp(num(opts.fadeIn, 2), 0, T > 0 ? T / 2 : num(opts.fadeIn, 2));
@@ -234,7 +244,7 @@ function planMusic(totalDuration, opts) {
 
 // Normalize one music input to a uniform stereo 48k stream so tracks of
 // different sample rates / channel layouts can be crossfaded together.
-function musicNormFilter(idx, label) {
+function musicNormFilter(idx: number, label: string): string {
   return `[${idx}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[${label}]`;
 }
 
@@ -243,8 +253,12 @@ function musicNormFilter(idx, label) {
 // [{path, duration}]. The graph is returned separately so the caller can write
 // it to a script file (it can be long for a big pool). Crossfade is reduced if
 // a track is too short to overlap by the requested amount.
-function buildLoopUnitArgs(tracks, filterScriptPath, outPath, opts) {
-  opts = opts || {};
+export function buildLoopUnitArgs(
+  tracks: TrackDuration[],
+  filterScriptPath: string,
+  outPath: string,
+  opts: { crossfade?: number } = {}
+): { args: string[]; filterComplex: string; crossfade: number } {
   const n = tracks.length;
   if (n === 0) throw new Error('buildLoopUnitArgs: no tracks provided');
 
@@ -253,10 +267,10 @@ function buildLoopUnitArgs(tracks, filterScriptPath, outPath, opts) {
   const maxCross = Number.isFinite(minDur) ? minDur / 2 : 4;
   const C = clamp(num(opts.crossfade, 4), 0, maxCross);
 
-  const inputArgs = [];
+  const inputArgs: string[] = [];
   tracks.forEach((t) => inputArgs.push('-i', t.path));
 
-  let filterComplex;
+  let filterComplex: string;
   if (n === 1) {
     filterComplex = musicNormFilter(0, 'mix');
   } else {
@@ -266,7 +280,7 @@ function buildLoopUnitArgs(tracks, filterScriptPath, outPath, opts) {
       const labels = tracks.map((_, i) => `[a${i}]`).join('');
       filterComplex = norm.join(';') + ';' + `${labels}concat=n=${n}:v=0:a=1[mix]`;
     } else {
-      const chain = [];
+      const chain: string[] = [];
       let prev = 'a0';
       for (let i = 1; i < n; i++) {
         const out = i === n - 1 ? 'mix' : `x${i}`;
@@ -285,14 +299,19 @@ function buildLoopUnitArgs(tracks, filterScriptPath, outPath, opts) {
 // Build the final mux: loop the music unit under the (already merged, silent)
 // video, applying volume + a fade-in at the start and fade-out at the end, and
 // trim to the exact video length. The video is stream-copied (no re-encode).
-function buildMusicMuxArgs(videoPath, loopUnitPath, outputPath, totalDuration, plan) {
-  plan = plan || {};
+export function buildMusicMuxArgs(
+  videoPath: string,
+  loopUnitPath: string,
+  outputPath: string,
+  totalDuration: number,
+  plan: Partial<MusicOptions> = {}
+): string[] {
   const T = num(totalDuration, 0);
   const FI = num(plan.fadeIn, 0);
   const FO = num(plan.fadeOut, 0);
   const V = num(plan.volume, 1);
 
-  const af = [];
+  const af: string[] = [];
   if (Math.abs(V - 1) > 1e-3) af.push(`volume=${fmtNum(V)}`);
   if (FI > 0.05) af.push(`afade=t=in:st=0:d=${fmtNum(FI)}`);
   if (FO > 0.05 && T > 0) af.push(`afade=t=out:st=${fmtNum(Math.max(0, T - FO))}:d=${fmtNum(FO)}`);
@@ -312,9 +331,9 @@ function buildMusicMuxArgs(videoPath, loopUnitPath, outputPath, totalDuration, p
 // ---------------------------------------------------------------------------
 
 // Does a clip already match the target spec (so it's kept losslessly)? Mirrors
-// matchesTargetVideo() in ffmpeg.js — kept here so the (pure) estimator has no
+// matchesTargetVideo() in ffmpeg.ts — kept here so the (pure) estimator has no
 // dependency on the merge engine.
-function clipMatchesTarget(clip, target, codec) {
+function clipMatchesTarget(clip: VideoSpecClip, target: Target, codec: Codec): boolean {
   return clip.width === target.W && clip.height === target.H &&
     Math.round(clip.fps || 0) === target.F && clip.vcodec === codec;
 }
@@ -322,9 +341,9 @@ function clipMatchesTarget(clip, target, codec) {
 // Rough per-second video bitrate (bits/s) for a re-encode at the given spec,
 // from a bits-per-pixel-per-frame model. Real CRF/CQ bitrate is very content
 // dependent, so this is deliberately a ballpark — surfaced as an estimate.
-function estimatedVideoBitrate(W, H, F, codec, quality) {
+export function estimatedVideoBitrate(W: number, H: number, F: number, codec: Codec, quality: Quality): number {
   const pps = Math.max(1, W) * Math.max(1, H) * Math.max(1, F); // pixels per second
-  const BPP = {
+  const BPP: Record<Codec, Record<Quality, number>> = {
     h264: { lossless: 1.5, near: 0.12, high: 0.08, balanced: 0.05 },
     hevc: { lossless: 1.2, near: 0.075, high: 0.05, balanced: 0.032 }
   };
@@ -344,13 +363,15 @@ const AUDIO_BITRATE_BPS = 320000;
 // accounts for temporary intermediates (per-clip segments / the pre-music
 // video copy), which roughly double disk use for any non-pure-copy merge.
 // opts: { forceReencode, music }.
-function estimateMergeBytes(clips, settings, opts) {
-  opts = opts || {};
-  settings = settings || {};
+export function estimateMergeBytes(
+  clips: EstimateClip[],
+  settings: Partial<Settings> = {},
+  opts: { forceReencode?: boolean; music?: boolean } = {}
+): SizeEstimate {
   if (!clips || !clips.length) return { bytes: 0, peakBytes: 0, exact: false, pureCopy: false };
 
   const target = resolveTarget(clips, settings);
-  const codec = settings.codec === 'hevc' ? 'hevc' : 'h264';
+  const codec: Codec = settings.codec === 'hevc' ? 'hevc' : 'h264';
   const quality = settings.quality || 'near';
   const forceReencode = !!opts.forceReencode;
 
@@ -377,7 +398,7 @@ function estimateMergeBytes(clips, settings, opts) {
 }
 
 // Parse one line of ffmpeg `-progress` output into elapsed output seconds.
-function parseProgressTime(line) {
+export function parseProgressTime(line: string): number | null {
   const m = line.match(/^out_time=(\d+):(\d+):(\d+(?:\.\d+)?)/);
   if (!m) return null;
   return (+m[1]) * 3600 + (+m[2]) * 60 + parseFloat(m[3]);
@@ -385,28 +406,7 @@ function parseProgressTime(line) {
 
 // Convert elapsed/total seconds to a percent, clamped below 100 so the bar only
 // reaches 100% when the process actually finishes.
-function computePercent(seconds, total) {
+export function computePercent(seconds: number, total: number): number {
   if (!(total > 0)) return 0;
   return Math.max(0, Math.min(99.5, (seconds / total) * 100));
 }
-
-module.exports = {
-  parseFps,
-  concatPath,
-  concatListContent,
-  isMp4Like,
-  buildCopyArgs,
-  reencodeTarget,
-  resolveTarget,
-  buildVideoEncodeArgs,
-  buildSegmentArgs,
-  buildReencodeArgs,
-  planMusic,
-  buildLoopUnitArgs,
-  buildMusicMuxArgs,
-  estimatedVideoBitrate,
-  estimateMergeBytes,
-  parseProgressTime,
-  computePercent,
-  RESOLUTIONS
-};

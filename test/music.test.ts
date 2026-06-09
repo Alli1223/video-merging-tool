@@ -1,8 +1,6 @@
-'use strict';
-
-const { test } = require('node:test');
-const assert = require('node:assert/strict');
-const { parseLength, listVibes, getVibe, VIBES } = require('../src/music');
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { parseLength, listVibes, getVibe, VIBES } from '../src/music';
 
 // Archive.org reports a file's length as either seconds ("176.34") or a clock
 // string ("2:56" / "1:02:03"). Both must parse so the track-length filter

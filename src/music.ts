@@ -1,5 +1,3 @@
-'use strict';
-
 // Fetches royalty-free background music on demand from the Internet Archive.
 //
 // We use a curated list of hand-vetted items that are genuinely original,
@@ -13,14 +11,57 @@
 // a mislabeled or changed item is skipped rather than trusted. Downloaded
 // tracks are cached locally, so the network is only touched the first time.
 
-const fs = require('fs');
-const path = require('path');
-const https = require('https');
-const http = require('http');
-const { URL } = require('url');
-const log = require('./logger');
+import fs from 'fs';
+import path from 'path';
+import * as http from 'http';
+import * as https from 'https';
+import { URL } from 'url';
+import * as log from './logger';
+
+function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
 
 const UA = 'VideoMergingTool (+https://github.com/Alli1223/video-merging-tool)';
+
+interface VibeDef {
+  key: string;
+  label: string;
+  description: string;
+  items: string[];
+}
+interface ArchiveFile {
+  name?: string;
+  format?: string;
+  length?: string | number;
+  title?: string;
+}
+interface ArchiveMeta {
+  metadata?: { licenseurl?: string; creator?: string | string[]; title?: string };
+  server?: string;
+  d1?: string;
+  dir?: string;
+  files?: ArchiveFile[];
+}
+interface Track {
+  id: string;
+  name: string;
+  length: number;
+  title: string;
+  album: string;
+  creator: string;
+  url: string;
+  fallbackUrl: string;
+}
+interface ManifestEntry {
+  file: string;
+  id: string;
+  album: string;
+  creator: string;
+  license: string;
+  source: string;
+  length: number;
+}
 
 // Hand-vetted CC0 (public-domain) chill music on the Internet Archive, grouped
 // into "vibes". Every identifier was verified track-by-track to be original
@@ -40,7 +81,7 @@ const VHS_JAZZ = 'vcr-and-vhs-jazz';            // "virtual metropolis" — late
 const PARTICLE_DREAMS = 'particle-dreams-moonlight'; // "moonlight" — soft, dreamy chill (9 tracks)
 
 // Each vibe maps to a set of source items. `mix` blends everything for variety.
-const VIBES = [
+export const VIBES: VibeDef[] = [
   { key: 'mix', label: '🎲 Chill mix (variety)', description: 'A blend of every style below', items: [VHS_JAZZ, PARTICLE_DREAMS, ...JOEL_PUTMAN] },
   { key: 'lofi', label: '🎧 Lo-fi beats', description: 'Mellow lo-fi / 8-bit instrumentals', items: JOEL_PUTMAN.slice() },
   { key: 'jazzy', label: '🎷 Jazzy & nocturnal', description: 'Smoky, late-night VHS jazz', items: [VHS_JAZZ] },
@@ -48,11 +89,11 @@ const VIBES = [
 ];
 const DEFAULT_VIBE = 'mix';
 
-function listVibes() {
+export function listVibes(): Vibe[] {
   return VIBES.map((v) => ({ key: v.key, label: v.label, description: v.description }));
 }
-function getVibe(key) {
-  return VIBES.find((v) => v.key === key) || VIBES.find((v) => v.key === DEFAULT_VIBE);
+export function getVibe(key?: string): VibeDef {
+  return VIBES.find((v) => v.key === key) || VIBES[0];
 }
 
 // Licence URLs we treat as "free, no attribution required". CC0 and the public
@@ -64,18 +105,18 @@ const PUBLIC_DOMAIN_MARKERS = ['publicdomain/zero', 'publicdomain/mark', 'creati
 const MIN_TRACK_SECONDS = 20;
 const MAX_TRACK_SECONDS = 15 * 60;
 
-const metadataUrl = (id) => `https://archive.org/metadata/${encodeURIComponent(id)}`;
+const metadataUrl = (id: string): string => `https://archive.org/metadata/${encodeURIComponent(id)}`;
 
 // ---------------------------------------------------------------------------
 // HTTP (with redirect handling — archive.org's /download/ URLs 302 to a
 // datanode, and metadata can redirect too).
 // ---------------------------------------------------------------------------
-function httpGet(rawUrl, redirectsLeft = 6) {
+function httpGet(rawUrl: string, redirectsLeft = 6): Promise<http.IncomingMessage> {
   return new Promise((resolve, reject) => {
-    let u;
+    let u: URL;
     try { u = new URL(rawUrl); } catch (e) { return reject(e); }
-    const lib = u.protocol === 'http:' ? http : https;
-    const req = lib.get(u, { headers: { 'User-Agent': UA, Accept: '*/*' } }, (res) => {
+    const getFn: typeof http.get = u.protocol === 'http:' ? http.get : https.get;
+    const req = getFn(u, { headers: { 'User-Agent': UA, Accept: '*/*' } }, (res) => {
       const code = res.statusCode || 0;
       if (code >= 300 && code < 400 && res.headers.location) {
         res.resume(); // drain and discard the redirect body
@@ -94,28 +135,28 @@ function httpGet(rawUrl, redirectsLeft = 6) {
   });
 }
 
-function getJson(url) {
-  return httpGet(url).then((res) => new Promise((resolve, reject) => {
+function getJson<T>(url: string): Promise<T> {
+  return httpGet(url).then((res) => new Promise<T>((resolve, reject) => {
     let body = '';
     res.setEncoding('utf8');
-    res.on('data', (d) => {
+    res.on('data', (d: string) => {
       body += d;
       if (body.length > 25 * 1024 * 1024) { res.destroy(); reject(new Error('Metadata response too large')); }
     });
-    res.on('end', () => { try { resolve(JSON.parse(body)); } catch (e) { reject(e); } });
+    res.on('end', () => { try { resolve(JSON.parse(body) as T); } catch (e) { reject(e); } });
     res.on('error', reject);
   }));
 }
 
 // Download a URL to dest (atomically, via a .part temp file), reporting bytes.
-function downloadTo(url, dest, onBytes) {
-  return httpGet(url).then((res) => new Promise((resolve, reject) => {
+function downloadTo(url: string, dest: string, onBytes: ((received: number, total: number) => void) | null): Promise<{ bytes: number }> {
+  return httpGet(url).then((res) => new Promise<{ bytes: number }>((resolve, reject) => {
     const total = parseInt(res.headers['content-length'] || '0', 10) || 0;
     let received = 0;
     const tmp = dest + '.part';
     const out = fs.createWriteStream(tmp);
-    const fail = (e) => { try { out.destroy(); } catch (_) {} try { fs.unlinkSync(tmp); } catch (_) {} reject(e); };
-    res.on('data', (d) => { received += d.length; if (onBytes) onBytes(received, total); });
+    const fail = (e: unknown) => { try { out.destroy(); } catch { /* */ } try { fs.unlinkSync(tmp); } catch { /* */ } reject(e); };
+    res.on('data', (d: Buffer) => { received += d.length; if (onBytes) onBytes(received, total); });
     res.on('error', fail);
     out.on('error', fail);
     out.on('finish', () => {
@@ -129,17 +170,17 @@ function downloadTo(url, dest, onBytes) {
 // ---------------------------------------------------------------------------
 // Internet Archive item → track list
 // ---------------------------------------------------------------------------
-function encodeName(name) {
+function encodeName(name: string): string {
   return name.split('/').map(encodeURIComponent).join('/');
 }
-function directFileUrl(server, dir, name) {
+function directFileUrl(server: string, dir: string, name: string): string {
   const d = dir.endsWith('/') ? dir.slice(0, -1) : dir;
   return `https://${server}${d}/${encodeName(name)}`;
 }
-function downloadFileUrl(id, name) {
+function downloadFileUrl(id: string, name: string): string {
   return `https://archive.org/download/${encodeURIComponent(id)}/${encodeName(name)}`;
 }
-function isPublicDomain(licenseUrl) {
+function isPublicDomain(licenseUrl: string | undefined): boolean {
   const l = String(licenseUrl || '').toLowerCase();
   return PUBLIC_DOMAIN_MARKERS.some((m) => l.includes(m));
 }
@@ -147,7 +188,7 @@ function isPublicDomain(licenseUrl) {
 // Archive.org's file `length` is sometimes seconds ("176.34") and sometimes a
 // clock string ("2:56" or "1:02:03"), depending on who derived the item. Parse
 // both so the track-length filter doesn't wrongly drop colon-formatted items.
-function parseLength(v) {
+export function parseLength(v: string | number | null | undefined): number {
   if (v == null) return 0;
   const s = String(v).trim();
   if (s.includes(':')) {
@@ -161,10 +202,10 @@ function parseLength(v) {
 
 // Fetch one item's metadata, verify it is public domain, and return its usable
 // audio tracks. Returns [] (and logs) for anything we can't or shouldn't use.
-async function listTracksForItem(id) {
-  let meta;
-  try { meta = await getJson(metadataUrl(id)); }
-  catch (e) { log.warn('music: metadata fetch failed for', id, '-', String((e && e.message) || e)); return []; }
+export async function listTracksForItem(id: string): Promise<Track[]> {
+  let meta: ArchiveMeta;
+  try { meta = await getJson<ArchiveMeta>(metadataUrl(id)); }
+  catch (e) { log.warn('music: metadata fetch failed for', id, '-', errMsg(e)); return []; }
 
   const m = meta.metadata || {};
   if (!isPublicDomain(m.licenseurl)) {
@@ -177,7 +218,7 @@ async function listTracksForItem(id) {
   const files = Array.isArray(meta.files) ? meta.files : [];
 
   const audio = files
-    .filter((f) => f && f.name && /mp3|ogg vorbis|flac/i.test(String(f.format || '')))
+    .filter((f): f is ArchiveFile & { name: string } => !!(f && f.name && /mp3|ogg vorbis|flac/i.test(String(f.format || ''))))
     .map((f) => ({ name: f.name, format: String(f.format || ''), length: parseLength(f.length), title: f.title || null }));
 
   // Each track is usually offered as MP3 plus an Ogg/FLAC derivative — keep the
@@ -203,7 +244,7 @@ async function listTracksForItem(id) {
 // ---------------------------------------------------------------------------
 // Selection + caching
 // ---------------------------------------------------------------------------
-function shuffle(arr) {
+function shuffle<T>(arr: T[]): T[] {
   const a = arr.slice();
   for (let i = a.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -214,30 +255,34 @@ function shuffle(arr) {
 
 // Round-robin across albums (after shuffling within each) so the pool draws
 // variety from every source rather than 10 tracks off one album.
-function pickVaried(candidates, k) {
-  const byItem = new Map();
+function pickVaried<T extends { id: string }>(candidates: T[], k: number): T[] {
+  const byItem = new Map<string, T[]>();
   for (const t of candidates) {
-    if (!byItem.has(t.id)) byItem.set(t.id, []);
-    byItem.get(t.id).push(t);
+    let arr = byItem.get(t.id);
+    if (!arr) { arr = []; byItem.set(t.id, arr); }
+    arr.push(t);
   }
   const queues = shuffle(Array.from(byItem.values()).map((list) => shuffle(list)));
-  const out = [];
+  const out: T[] = [];
   let added = true;
   while (out.length < k && added) {
     added = false;
     for (const q of queues) {
-      if (q.length && out.length < k) { out.push(q.shift()); added = true; }
+      if (q.length && out.length < k) {
+        const next = q.shift();
+        if (next !== undefined) { out.push(next); added = true; }
+      }
     }
   }
   return out;
 }
 
-function cacheNameFor(track) {
+function cacheNameFor(track: { id: string; name: string }): string {
   // Keep it filesystem-safe and bounded, preserving the extension at the tail.
   return (track.id + '__' + track.name).replace(/[^a-zA-Z0-9._-]+/g, '_').slice(-180);
 }
 
-function clampPct(fraction) {
+function clampPct(fraction: number): number {
   return Math.max(0, Math.min(100, Math.round((fraction || 0) * 100)));
 }
 
@@ -245,35 +290,37 @@ function clampPct(fraction) {
 // populated cache can be reused instantly, with no network call and no need to
 // re-derive credits — important for "fetch on demand": you download once, then
 // every later merge (even offline) just reuses the cache.
-function manifestPath(cacheDir) { return path.join(cacheDir, 'manifest.json'); }
+function manifestPath(cacheDir: string): string { return path.join(cacheDir, 'manifest.json'); }
 
-function loadManifest(cacheDir) {
+function loadManifest(cacheDir: string): ManifestEntry[] {
   try {
-    const data = JSON.parse(fs.readFileSync(manifestPath(cacheDir), 'utf8'));
+    const data = JSON.parse(fs.readFileSync(manifestPath(cacheDir), 'utf8')) as { tracks?: ManifestEntry[] };
     const tracks = Array.isArray(data.tracks) ? data.tracks : [];
     return tracks.filter((t) => t && t.file && fs.existsSync(path.join(cacheDir, t.file)));
-  } catch (_) { return []; }
+  } catch { return []; }
 }
 
-function saveManifest(cacheDir, tracks) {
+function saveManifest(cacheDir: string, tracks: ManifestEntry[]): void {
   try { fs.writeFileSync(manifestPath(cacheDir), JSON.stringify({ tracks }, null, 2)); }
-  catch (e) { log.warn('music: could not write cache manifest:', String((e && e.message) || e)); }
+  catch (e) { log.warn('music: could not write cache manifest:', errMsg(e)); }
 }
 
 // Build the { trackPaths, credits, totalSeconds } result from manifest entries.
 // Credits are grouped per artist (case-insensitively) so a vibe made of many
 // single-track items — e.g. one artist's lo-fi catalogue — shows one clean
 // credit ("Artist — N tracks") rather than the same name repeated.
-function resultFromEntries(cacheDir, entries) {
-  const byCreator = new Map();
+function resultFromEntries(cacheDir: string, entries: ManifestEntry[]): MusicResult {
+  const byCreator = new Map<string, { creator: string; license: string; source: string; albums: Set<string> }>();
   for (const e of entries) {
     const key = String(e.creator || 'Unknown artist').trim().toLowerCase();
-    if (!byCreator.has(key)) {
-      byCreator.set(key, { creator: e.creator || 'Unknown artist', license: e.license || 'CC0 (Public Domain)', source: e.source || 'Internet Archive', albums: new Set() });
+    let agg = byCreator.get(key);
+    if (!agg) {
+      agg = { creator: e.creator || 'Unknown artist', license: e.license || 'CC0 (Public Domain)', source: e.source || 'Internet Archive', albums: new Set<string>() };
+      byCreator.set(key, agg);
     }
-    byCreator.get(key).albums.add(e.album);
+    agg.albums.add(e.album);
   }
-  const credits = Array.from(byCreator.values()).map((c) => {
+  const credits: Credit[] = Array.from(byCreator.values()).map((c) => {
     const albums = Array.from(c.albums);
     return { creator: c.creator, album: albums.length > 1 ? `${albums.length} tracks` : albums[0], license: c.license, source: c.source };
   });
@@ -284,7 +331,7 @@ function resultFromEntries(cacheDir, entries) {
   };
 }
 
-function vibeCacheDir(baseDir, vibeKey) {
+function vibeCacheDir(baseDir: string, vibeKey: string): string {
   return path.join(baseDir, String(vibeKey).replace(/[^a-z0-9_-]/gi, '') || DEFAULT_VIBE);
 }
 
@@ -292,12 +339,15 @@ function vibeCacheDir(baseDir, vibeKey) {
 // downloading only what's missing. Each vibe caches into its own subfolder, so
 // switching between vibes never re-downloads. Returns { trackPaths, credits,
 // totalSeconds, vibe }.
-async function fetchTracks({ cacheDir, vibe = DEFAULT_VIBE, poolSize = 8, onProgress } = {}) {
+export async function fetchTracks(
+  { cacheDir, vibe = DEFAULT_VIBE, poolSize = 8, onProgress }:
+  { cacheDir: string; vibe?: string; poolSize?: number; onProgress?: (p: MusicProgress) => void }
+): Promise<MusicResult> {
   if (!cacheDir) throw new Error('fetchTracks: cacheDir is required');
   const v = getVibe(vibe);
   const dir = vibeCacheDir(cacheDir, v.key);
   fs.mkdirSync(dir, { recursive: true });
-  const emit = (stage, fraction, extra) => {
+  const emit = (stage: MusicProgress['stage'], fraction: number, extra?: Partial<MusicProgress>) => {
     if (onProgress) onProgress({ stage, vibe: v.key, percent: clampPct(fraction), ...(extra || {}) });
   };
 
@@ -314,10 +364,10 @@ async function fetchTracks({ cacheDir, vibe = DEFAULT_VIBE, poolSize = 8, onProg
   emit('listing', 0);
   const seeds = shuffle(v.items.slice());
   const target = Math.max(poolSize * 2, 16);
-  let candidates = [];
+  let candidates: Track[] = [];
   for (const id of seeds) {
     try { candidates = candidates.concat(await listTracksForItem(id)); }
-    catch (e) { log.warn('music: listing failed for', id, '-', String((e && e.message) || e)); }
+    catch (e) { log.warn('music: listing failed for', id, '-', errMsg(e)); }
     if (candidates.length >= target) break;
   }
 
@@ -330,7 +380,7 @@ async function fetchTracks({ cacheDir, vibe = DEFAULT_VIBE, poolSize = 8, onProg
   // 3) Download fresh tracks we don't already have, up to poolSize.
   const cachedFiles = new Set(cached.map((t) => t.file));
   const fresh = pickVaried(candidates.filter((t) => !cachedFiles.has(cacheNameFor(t))), Math.max(0, poolSize - cached.length));
-  const newEntries = [];
+  const newEntries: ManifestEntry[] = [];
   let done = 0;
 
   for (const t of fresh) {
@@ -346,13 +396,13 @@ async function fetchTracks({ cacheDir, vibe = DEFAULT_VIBE, poolSize = 8, onProg
         } catch (e1) {
           // The direct datanode URL can occasionally fail; fall back to the
           // canonical /download/ URL (which redirects to a working node).
-          log.warn('music: direct download failed, retrying via /download/:', String((e1 && e1.message) || e1));
+          log.warn('music: direct download failed, retrying via /download/:', errMsg(e1));
           await downloadTo(t.fallbackUrl, dest, null);
         }
       }
       newEntries.push({ file, id: t.id, album: t.album, creator: t.creator, license: 'CC0 (Public Domain)', source: 'Internet Archive', length: t.length });
     } catch (e) {
-      log.warn('music: failed to fetch', t.id, t.name, '-', String((e && e.message) || e));
+      log.warn('music: failed to fetch', t.id, t.name, '-', errMsg(e));
     }
     done++;
     emit('downloading', done / fresh.length);
@@ -369,30 +419,31 @@ async function fetchTracks({ cacheDir, vibe = DEFAULT_VIBE, poolSize = 8, onProg
 // Cache management + source info (for the UI)
 // ---------------------------------------------------------------------------
 // Total downloaded music across every vibe subfolder (excludes manifests).
-function cacheInfo(cacheDir) {
+export function cacheInfo(cacheDir: string): CacheInfo {
   let count = 0;
   let bytes = 0;
   try {
     for (const sub of fs.readdirSync(cacheDir)) {
       const subPath = path.join(cacheDir, sub);
-      let st; try { st = fs.statSync(subPath); } catch (_) { continue; }
+      let st: fs.Stats;
+      try { st = fs.statSync(subPath); } catch { continue; }
       if (!st.isDirectory()) continue;
       for (const f of fs.readdirSync(subPath)) {
         if (f.endsWith('.part') || f === 'manifest.json') continue;
-        try { bytes += fs.statSync(path.join(subPath, f)).size; count++; } catch (_) {}
+        try { bytes += fs.statSync(path.join(subPath, f)).size; count++; } catch { /* */ }
       }
     }
-  } catch (_) { /* nothing cached */ }
+  } catch { /* nothing cached */ }
   return { count, bytes };
 }
 
-function clearCache(cacheDir) {
-  try { fs.rmSync(cacheDir, { recursive: true, force: true }); } catch (_) { /* nothing cached */ }
-  try { fs.mkdirSync(cacheDir, { recursive: true }); } catch (_) {}
+export function clearCache(cacheDir: string): boolean {
+  try { fs.rmSync(cacheDir, { recursive: true, force: true }); } catch { /* nothing cached */ }
+  try { fs.mkdirSync(cacheDir, { recursive: true }); } catch { /* */ }
   return true;
 }
 
-function sourceInfo() {
+export function sourceInfo(): SourceInfo {
   return {
     name: 'Internet Archive',
     license: 'CC0 / Public Domain',
@@ -400,5 +451,3 @@ function sourceInfo() {
     browseUrl: 'https://archive.org/search?query=subject%3Alofi+AND+licenseurl%3A%28%2Apublicdomain%2A%29'
   };
 }
-
-module.exports = { fetchTracks, cacheInfo, clearCache, sourceInfo, listVibes, getVibe, listTracksForItem, parseLength, VIBES };

@@ -1,14 +1,12 @@
-'use strict';
-
-const { test } = require('node:test');
-const assert = require('node:assert/strict');
-const {
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
   parseFps, concatPath, concatListContent, isMp4Like,
   buildCopyArgs, reencodeTarget, buildReencodeArgs, parseProgressTime, computePercent,
   resolveTarget, buildVideoEncodeArgs, buildSegmentArgs,
   planMusic, buildLoopUnitArgs, buildMusicMuxArgs,
   estimatedVideoBitrate, estimateMergeBytes
-} = require('../src/ffargs');
+} from '../src/ffargs';
 
 test('parseFps handles fractions and edge cases', () => {
   assert.equal(parseFps('30/1'), 30);
@@ -133,7 +131,7 @@ test('buildVideoEncodeArgs selects encoder/codec/quality correctly', () => {
 test('buildSegmentArgs copies matching video and re-encodes the rest', () => {
   const clip = { path: '/a.mp4', width: 3840, height: 2160, fps: 60, hasAudio: true, duration: 5 };
   const target = { W: 3840, H: 2160, F: 60 };
-  const enc = { codec: 'hevc', useNvenc: true, quality: 'near' };
+  const enc = { codec: 'hevc' as const, useNvenc: true, quality: 'near' as const };
 
   const copy = buildSegmentArgs(clip, target, enc, '/seg.mp4', true).join(' ');
   assert.ok(copy.includes('-c:v copy'));         // matching clip kept losslessly

@@ -2,14 +2,16 @@
   "name": "video-merging-tool",
   "version": "0.4.0",
   "description": "Scan a folder of videos, order them by capture time, reorder on a drag-and-drop timeline, and merge them into one file. Lossless stream-copy when clips are compatible, automatic re-encode fallback otherwise.",
-  "main": "main.js",
+  "main": "out/main.js",
   "scripts": {
-    "start": "electron .",
-    "test": "node --test \"test/**/*.test.js\"",
-    "test:engine": "node selftest.js",
-    "dist": "electron-builder",
-    "dist:win": "electron-builder --win --publish never",
-    "dist:linux": "electron-builder --linux --publish never"
+    "build": "tsc && node scripts/copy-assets.js",
+    "typecheck": "tsc --noEmit",
+    "start": "npm run build && electron .",
+    "test": "tsc && node --test \"out/test/**/*.test.js\"",
+    "test:engine": "tsc && node out/selftest.js",
+    "dist": "npm run build && electron-builder",
+    "dist:win": "npm run build && electron-builder --win --publish never",
+    "dist:linux": "npm run build && electron-builder --linux --publish never"
   },
   "author": "Alastair Rayner",
   "license": "MIT",
@@ -22,8 +24,10 @@
     "ffprobe-static": "^3.1.0"
   },
   "devDependencies": {
+    "@types/node": "^25.9.2",
     "electron": "^33.0.0",
-    "electron-builder": "^25.1.8"
+    "electron-builder": "^25.1.8",
+    "typescript": "^6.0.3"
   },
   "build": {
     "appId": "com.videomergingtool.app",
@@ -34,10 +38,7 @@
       "repo": "video-merging-tool"
     },
     "files": [
-      "main.js",
-      "preload.js",
-      "src/**/*",
-      "renderer/**/*",
+      "out/**/*",
       "package.json"
     ],
     "asarUnpack": [
@@ -48,6 +49,7 @@
       "output": "dist"
     },
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         "nsis",
         "portable"
@@ -64,6 +66,7 @@
       "artifactName": "VideoMergingTool-Portable-${version}.${ext}"
     },
     "linux": {
+      "icon": "build/icon.png",
       "target": [
         "AppImage"
       ],

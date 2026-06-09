@@ -1,21 +1,25 @@
 // Headless verification of the merge engine (no GUI). Generates real test
 // clips, then drives the actual scanner + ffmpeg modules end to end.
-const path = require('path');
-const fs = require('fs');
-const os = require('os');
-const { execFileSync } = require('child_process');
-const ffmpegPath = require('ffmpeg-static');
-const ffprobePath = require('ffprobe-static').path;
-const { scanDirectory } = require('./src/scanner');
-const ffmpeg = require('./src/ffmpeg');
+import path from 'path';
+import fs from 'fs';
+import os from 'os';
+import { execFileSync } from 'child_process';
+import ffmpegStatic from 'ffmpeg-static';
+import ffprobeStatic from 'ffprobe-static';
+import { scanDirectory } from './src/scanner';
+import * as ffmpeg from './src/ffmpeg';
 
-function gen(dir, name, args) {
-  execFileSync(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', ...args, path.join(dir, name)]);
+if (!ffmpegStatic) throw new Error('ffmpeg-static binary not found — run "npm install"');
+const FFMPEG: string = ffmpegStatic;
+const FFPROBE: string = ffprobeStatic.path;
+
+function gen(dir: string, name: string, args: string[]): void {
+  execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', ...args, path.join(dir, name)]);
   console.log('  generated', name);
 }
 
-function probe(f) {
-  const out = execFileSync(ffprobePath, [
+function probe(f: string): void {
+  const out = execFileSync(FFPROBE, [
     '-v', 'error',
     '-show_entries', 'format=duration',
     '-show_entries', 'stream=codec_type,width,height',
@@ -25,14 +29,14 @@ function probe(f) {
     out.trim().split(/\r?\n/).join(' | '));
 }
 
-function audioStreamCount(f) {
-  const out = execFileSync(ffprobePath, ['-v', 'error', '-select_streams', 'a',
+function audioStreamCount(f: string): number {
+  const out = execFileSync(FFPROBE, ['-v', 'error', '-select_streams', 'a',
     '-show_entries', 'stream=index', '-of', 'csv=p=0', f]).toString().trim();
   return out ? out.split(/\r?\n/).filter(Boolean).length : 0;
 }
 
-function durationOf(f) {
-  const out = execFileSync(ffprobePath, ['-v', 'error', '-show_entries', 'format=duration',
+function durationOf(f: string): number {
+  const out = execFileSync(FFPROBE, ['-v', 'error', '-show_entries', 'format=duration',
     '-of', 'default=nokey=1:noprint_wrappers=1', f]).toString().trim();
   return parseFloat(out) || 0;
 }
@@ -68,14 +72,17 @@ function durationOf(f) {
   const keys = new Set(clips.map((c) => c.compatKey));
   console.log('  mixed formats  :', keys.size > 1 ? 'PASS (' + keys.size + ' keys)' : 'FAIL');
 
-  const onProg = (label) => { let last = 0; return (p) => {
-    if (p.percent - last >= 25 || p.percent === 100) { last = p.percent; process.stdout.write(` ${Math.round(p.percent)}%`); }
-  }; };
+  const onProg = (): ((p: Progress) => void) => {
+    let last = 0;
+    return (p: Progress) => {
+      if (p.percent - last >= 25 || p.percent === 100) { last = p.percent; process.stdout.write(` ${Math.round(p.percent)}%`); }
+    };
+  };
 
   // --- Lossless copy on the two compatible clips ---
   console.log('\n--- Lossless copy merge (A+B) ---');
   const outCopy = path.join(dir, 'merged_copy.mp4');
-  const r1 = await ffmpeg.merge({ outputPath: outCopy, mode: 'copy',
+  const r1 = await ffmpeg.merge({ outputPath: outCopy,
     clips: clips.filter((c) => c.name !== 'C_clip.mp4') }, onProg());
   console.log('\n  result:', JSON.stringify(r1));
   probe(outCopy);
@@ -84,7 +91,7 @@ function durationOf(f) {
   // --- Re-encode fallback on all three (mixed formats + missing audio) ---
   console.log('\n--- Re-encode merge (A+B+C, C has no audio) ---');
   const outRe = path.join(dir, 'merged_reencode.mp4');
-  const r2 = await ffmpeg.merge({ outputPath: outRe, mode: 'reencode', clips }, onProg());
+  const r2 = await ffmpeg.merge({ outputPath: outRe, clips }, onProg());
   console.log('\n  result:', JSON.stringify(r2));
   probe(outRe);
   console.log('  output exists  :', fs.existsSync(outRe) ? 'PASS' : 'FAIL');
