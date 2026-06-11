@@ -8,7 +8,8 @@ import {
   parseFps, concatListContent, buildCopyArgs, buildReencodeArgs,
   resolveTarget, buildSegmentArgs, parseProgressTime, computePercent,
   planMusic, buildLoopUnitArgs, buildMusicMuxArgs,
-  buildVerifyArgs, buildVideoCrcArgs, parseCrcOutput, assessIntegrity, durationTolerance
+  buildVerifyArgs, buildVideoCrcArgs, parseCrcOutput, assessIntegrity, durationTolerance,
+  splitLimitBytes, partPath, planParts
 } from './ffargs';
 import * as log from './logger';
 
@@ -659,17 +660,18 @@ function siblingTempVideo(outputPath: string): string {
   return path.join(path.dirname(outputPath), `.vmt-nomusic-${process.pid}-${Date.now()}${ext}`);
 }
 
-// Entry point used by the IPC handler.
-export async function merge(opts: MergeOptions, onProgress: ProgressCb): Promise<MergeResult> {
+// Merge one set of clips into ONE output file (the pre-split engine flow).
+async function mergeSingle(opts: MergeOptions, onProgress: ProgressCb): Promise<MergeResult> {
   assertBinaries();
-  canceled = false;
   const { clips, outputPath, forceReencode } = opts;
   const settings: Partial<Settings> = opts.settings || {};
 
   if (!clips || clips.length === 0) throw new Error('No clips to merge.');
   if (!outputPath) throw new Error('No output path provided.');
 
-  const target = resolveTarget(clips, settings);
+  // A size-split merge pins the target from the FULL clip list so every part
+  // comes out at the same resolution/fps.
+  const target = opts.targetOverride || resolveTarget(clips, settings);
   const codec: Codec = settings.codec === 'hevc' ? 'hevc' : 'h264';
   const quality = settings.quality || 'near';
 
@@ -782,6 +784,155 @@ export async function merge(opts: MergeOptions, onProgress: ProgressCb): Promise
     if (isCanceled(err)) return { success: false, canceled: true };
     throw err;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Size-limited splitting (e.g. YouTube's 256 GB per-file upload cap)
+// ---------------------------------------------------------------------------
+
+function statBytes(p: string): number {
+  try { return fs.statSync(p).size; } catch { return 0; }
+}
+
+function fmtGB(bytes: number): string {
+  return (bytes / 1e9).toFixed(bytes >= 10e9 ? 0 : 2) + ' GB';
+}
+
+// Merge with a max-bytes-per-file limit: clips are packed into consecutive
+// parts (planned from per-clip size estimates), and each part is merged as its
+// own file through the full single-merge pipeline — verification and repair
+// included. Every produced part is then measured: one that still exceeds the
+// limit (re-encode bitrate is content-dependent, so estimates can undershoot)
+// is split in half at a clip boundary and redone, so "every file fits" holds
+// regardless of how good the estimates were.
+async function mergeSplit(opts: MergeOptions, limitBytes: number, onProgress: ProgressCb): Promise<MergeResult> {
+  const settings: Partial<Settings> = opts.settings || {};
+  const { clips, outputPath, forceReencode } = opts;
+  if (!clips || clips.length === 0) throw new Error('No clips to merge.');
+  if (!outputPath) throw new Error('No output path provided.');
+
+  const wantMusic = !!(opts.music && Array.isArray(opts.music.trackPaths) && opts.music.trackPaths.length);
+  // The planner needs file sizes; the renderer sends them, but fall back to
+  // statting so direct engine callers keep working.
+  const planClips: EstimateClip[] = clips.map((c) => ({
+    width: c.width, height: c.height, fps: c.fps, vcodec: c.vcodec,
+    compatKey: c.compatKey, duration: c.duration || 0,
+    size: c.size != null ? c.size : statBytes(c.path)
+  }));
+  // Pin the target from the FULL clip list so every part matches.
+  const targetOverride = opts.targetOverride || resolveTarget(clips, settings);
+  const queue = planParts(planClips, settings, { forceReencode, music: wantMusic }, limitBytes);
+
+  // Fail fast on a hopeless plan: a single stream-copied clip whose EXACT size
+  // exceeds the limit can never fit, no matter how the timeline is split.
+  const hopeless = queue.find((p) => p.oversize && p.exact);
+  if (hopeless) {
+    const c = clips[hopeless.start];
+    throw new Error(
+      `"${c.name || path.basename(c.path)}" is ${fmtGB(hopeless.estBytes)} on its own, over the ` +
+      `${fmtGB(limitBytes)} per-file limit — splitting happens at clip boundaries, so it can never fit. ` +
+      'Lower the quality, turn on "Force re-encode every clip", or raise the split limit.');
+  }
+
+  const totalDuration = clips.reduce((s, c) => s + (c.duration || 0), 0);
+  log.info(`Split merge: limit ${fmtGB(limitBytes)}, ${queue.length} planned part(s):`,
+    queue.map((p) => `clips ${p.start + 1}-${p.end + 1} ~${fmtGB(p.estBytes)}${p.exact ? ' (exact)' : ''}`).join(', '));
+
+  const parts: PartInfo[] = [];
+  const repaired: RepairedClip[] = [];
+  const notes: string[] = [];
+  let allVerified = true;
+  let anyMusicFailed = false;
+  let lastMode: MergeResult['mode'];
+  let doneDuration = 0;
+
+  const cleanupParts = (): void => { for (const p of parts) safeUnlink(p.path); };
+
+  try {
+    while (queue.length) {
+      if (canceled) { cleanupParts(); return { success: false, canceled: true }; }
+      const range = queue.shift() as PartPlan;
+      const partClips = clips.slice(range.start, range.end + 1);
+      const partDuration = partClips.reduce((s, c) => s + (c.duration || 0), 0);
+      const partNo = parts.length + 1;
+      const partsKnown = parts.length + 1 + queue.length;
+      // A merge that fits in one file keeps the chosen name; real parts get a
+      // _partN suffix.
+      const singleFile = parts.length === 0 && queue.length === 0;
+      const pPath = singleFile ? outputPath : partPath(outputPath, partNo);
+
+      const partProgress: ProgressCb = (p) => onProgress({
+        ...p,
+        ...(singleFile ? {} : { part: partNo, partsTotal: partsKnown }),
+        percent: totalDuration > 0
+          ? ((doneDuration + ((p.percent || 0) / 100) * partDuration) / totalDuration) * 100
+          : (p.percent || 0)
+      });
+
+      log.info(`Part ${partNo}/${partsKnown}: clips ${range.start + 1}-${range.end + 1} -> ${pPath} (est. ${fmtGB(range.estBytes)})`);
+      const res = await mergeSingle({ ...opts, clips: partClips, outputPath: pPath, targetOverride }, partProgress);
+      if (res.canceled || canceled) { cleanupParts(); return { success: false, canceled: true }; }
+
+      const bytes = statBytes(pPath);
+      if (bytes > limitBytes) {
+        safeUnlink(pPath);
+        if (partClips.length <= 1) {
+          const c = partClips[0];
+          throw new Error(
+            `"${c.name || path.basename(c.path)}" encoded to ${fmtGB(bytes)}, over the ${fmtGB(limitBytes)} ` +
+            'per-file limit, and a single clip cannot be split further. Lower the quality or raise the split limit.');
+        }
+        // The estimate undershot. Split this part in half at a clip boundary
+        // and redo both halves (they are re-measured like any other part).
+        log.warn(`Part ${partNo} came out at ${fmtGB(bytes)} (limit ${fmtGB(limitBytes)}); splitting it in half and retrying.`);
+        const midEnd = range.start + Math.ceil(partClips.length / 2) - 1;
+        queue.unshift(
+          { start: range.start, end: midEnd, estBytes: range.estBytes / 2, oversize: false, exact: range.exact },
+          { start: midEnd + 1, end: range.end, estBytes: range.estBytes / 2, oversize: false, exact: range.exact }
+        );
+        continue;
+      }
+
+      parts.push({ path: pPath, bytes, clips: partClips.length });
+      doneDuration += partDuration;
+      lastMode = res.mode;
+      if (res.repaired) repaired.push(...res.repaired);
+      if (res.verified === false) allVerified = false;
+      if (res.verifyNote) notes.push(singleFile ? res.verifyNote : `part ${partNo}: ${res.verifyNote}`);
+      if (res.musicFailed) anyMusicFailed = true;
+    }
+  } catch (err) {
+    cleanupParts();
+    if (isCanceled(err)) return { success: false, canceled: true };
+    throw err;
+  }
+
+  const result: MergeResult = {
+    success: true,
+    mode: lastMode,
+    outputPath: parts[0].path,
+    verified: allVerified
+  };
+  if (parts.length > 1) result.parts = parts;
+  if (repaired.length) result.repaired = repaired;
+  if (notes.length) result.verifyNote = notes.join('; ');
+  if (wantMusic) {
+    result.music = !anyMusicFailed;
+    if (anyMusicFailed) result.musicFailed = true;
+  }
+  log.info(`Split merge finished: ${parts.length} part(s):`,
+    parts.map((p) => `${path.basename(p.path)} ${fmtGB(p.bytes)}`).join(', '));
+  return result;
+}
+
+// Entry point used by the IPC handler. Splits the output into size-limited
+// parts when the split setting is on; otherwise merges to a single file.
+export async function merge(opts: MergeOptions, onProgress: ProgressCb): Promise<MergeResult> {
+  assertBinaries();
+  canceled = false;
+  const limitBytes = splitLimitBytes(opts.settings || {});
+  if (!limitBytes) return mergeSingle(opts, onProgress);
+  return mergeSplit(opts, limitBytes, onProgress);
 }
 
 export function cancel(): void {

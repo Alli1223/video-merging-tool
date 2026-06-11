@@ -6,7 +6,8 @@ import {
   resolveTarget, buildVideoEncodeArgs, buildSegmentArgs,
   planMusic, buildLoopUnitArgs, buildMusicMuxArgs,
   estimatedVideoBitrate, estimateMergeBytes,
-  buildVerifyArgs, buildVideoCrcArgs, parseCrcOutput, durationTolerance, assessIntegrity
+  buildVerifyArgs, buildVideoCrcArgs, parseCrcOutput, durationTolerance, assessIntegrity,
+  splitLimitBytes, partPath, planParts
 } from '../src/ffargs';
 
 test('parseFps handles fractions and edge cases', () => {
@@ -391,4 +392,73 @@ test('assessIntegrity tolerates drift and over-length, and skips absent checks',
   assert.ok(assessIntegrity({ exitCode: 0, errorCount: 0, errorSample: [], decodedDuration: null, crc: '0xabcabc01', expectedCrc: null }).ok);
   // matching CRC pair stays clean
   assert.ok(assessIntegrity({ exitCode: 0, errorCount: 0, errorSample: [], decodedDuration: 60, expectedDuration: 60, crc: '0xaaaaaaaa', expectedCrc: '0xaaaaaaaa' }).ok);
+});
+
+test('splitLimitBytes maps the setting to bytes (0 = off)', () => {
+  assert.equal(splitLimitBytes({}), 0);
+  assert.equal(splitLimitBytes({ split: 'off' }), 0);
+  assert.equal(splitLimitBytes({ split: '256' }), 256e9); // YouTube upload cap
+  assert.equal(splitLimitBytes({ split: '4' }), 4e9);     // FAT32
+});
+
+test('partPath inserts _partN before the extension', () => {
+  assert.equal(partPath('/videos/holiday_merged.mp4', 1), '/videos/holiday_merged_part1.mp4');
+  assert.equal(partPath('/videos/holiday_merged.mp4', 12), '/videos/holiday_merged_part12.mp4');
+  assert.equal(partPath('/videos/noext', 2), '/videos/noext_part2');
+});
+
+// A 1080p30 h264 clip that exactly matches the default auto target, so its
+// (exact) file size is used as its packing weight.
+function copyClip(size: number, duration = 60): EstimateClip {
+  return { width: 1920, height: 1080, fps: 30, vcodec: 'h264', compatKey: 'k1', size, duration };
+}
+
+test('planParts packs consecutive matching clips by their exact sizes', () => {
+  // budget = 100e9 * 0.95 = 95e9 -> 40+40 fits, the third 40 starts part 2
+  const parts = planParts(
+    [copyClip(40e9), copyClip(40e9), copyClip(40e9)],
+    { codec: 'h264' }, {}, 100e9
+  );
+  assert.equal(parts.length, 2);
+  assert.deepEqual([parts[0].start, parts[0].end], [0, 1]);
+  assert.deepEqual([parts[1].start, parts[1].end], [2, 2]);
+  assert.equal(parts[0].estBytes, 80e9);  // exact sizes, no inflation
+  assert.equal(parts[0].exact, true);
+  assert.equal(parts[0].oversize, false);
+  // parts tile the clip list: contiguous, in order, no gaps
+  assert.equal(parts[0].end + 1, parts[1].start);
+});
+
+test('planParts flags a single clip that cannot fit (exact oversize)', () => {
+  const parts = planParts(
+    [copyClip(40e9), copyClip(120e9), copyClip(40e9)],
+    { codec: 'h264' }, {}, 100e9
+  );
+  assert.equal(parts.length, 3); // the oversize clip is isolated in its own part
+  assert.equal(parts[1].oversize, true);
+  assert.equal(parts[1].exact, true);
+  assert.equal(parts[0].oversize, false);
+});
+
+test('planParts inflates re-encode estimates with a safety factor', () => {
+  // forceReencode -> the model (x safety), not the file size, is the weight
+  const clip = copyClip(40e9, 3600);
+  const [part] = planParts([clip], { codec: 'h264', quality: 'near' }, { forceReencode: true }, 1000e9);
+  const model = (estimatedVideoBitrate(1920, 1080, 30, 'h264', 'near') / 8) * 3600;
+  assert.equal(part.estBytes, model * 1.5);
+  assert.equal(part.exact, false);
+});
+
+test('planParts adds the music audio track to each clip weight', () => {
+  const clip = copyClip(40e9, 100);
+  const [plain] = planParts([clip], { codec: 'h264' }, {}, 1000e9);
+  const [withMusic] = planParts([clip], { codec: 'h264' }, { music: true }, 1000e9);
+  assert.equal(withMusic.estBytes - plain.estBytes, (320000 / 8) * 100);
+});
+
+test('planParts with no limit returns one part covering everything', () => {
+  const parts = planParts([copyClip(40e9), copyClip(40e9)], { codec: 'h264' }, {}, 0);
+  assert.equal(parts.length, 1);
+  assert.deepEqual([parts[0].start, parts[0].end], [0, 1]);
+  assert.equal(planParts([], {}, {}, 100e9).length, 0);
 });

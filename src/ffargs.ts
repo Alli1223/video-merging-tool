@@ -461,6 +461,79 @@ export function estimateMergeBytes(
   return { bytes: Math.round(bytes), peakBytes: Math.round(peakBytes), exact, pureCopy };
 }
 
+// ---------------------------------------------------------------------------
+// Size-limited splitting (e.g. YouTube's 256 GB per-file upload cap)
+// ---------------------------------------------------------------------------
+// The output is split at CLIP boundaries: consecutive clips are greedily packed
+// into parts whose estimated size stays under the limit, and each part is then
+// merged as an independent file. Stream-copied clips contribute their exact
+// file size; re-encoded clips use the bitrate model inflated by a safety
+// factor (real CRF bitrate is content-dependent and can exceed the model).
+// The engine still measures every produced part and re-splits one that came
+// out oversized, so the safety factor only has to be roughly right.
+
+const REENCODE_SAFETY = 1.5;
+// Headroom under the hard limit for container overhead / estimate noise.
+const SPLIT_BUDGET = 0.95;
+
+// Map the split setting ('off' | GB string) to a byte limit; 0 = no splitting.
+export function splitLimitBytes(settings: Partial<Settings> = {}): number {
+  if (!settings.split || settings.split === 'off') return 0;
+  const gb = parseFloat(settings.split);
+  return gb > 0 ? Math.round(gb * 1e9) : 0;
+}
+
+// "C:\v\out.mp4" + 2 -> "C:\v\out_part2.mp4" (extension preserved).
+export function partPath(outputPath: string, n: number): string {
+  const ext = path.extname(outputPath);
+  return outputPath.slice(0, outputPath.length - ext.length) + `_part${n}` + ext;
+}
+
+// The bytes one clip is expected to contribute to the merged output.
+function clipWeightBytes(
+  clip: EstimateClip, target: Target, codec: Codec, quality: Quality,
+  forceReencode: boolean, music: boolean
+): { bytes: number; exact: boolean } {
+  const copied = !forceReencode && clipMatchesTarget(clip, target, codec) && (clip.size || 0) > 0;
+  const bytes = copied
+    ? (clip.size || 0)
+    : (estimatedVideoBitrate(target.W, target.H, target.F, codec, quality) / 8) * (clip.duration || 0) * REENCODE_SAFETY;
+  return { bytes: bytes + (music ? (AUDIO_BITRATE_BPS / 8) * (clip.duration || 0) : 0), exact: copied };
+}
+
+// Greedily pack consecutive clips into parts of at most limitBytes (with the
+// budget headroom). Order is preserved and every clip lands in exactly one
+// part. A single clip whose weight alone exceeds the budget becomes its own
+// part flagged `oversize` — the caller decides whether that is fatal (exact
+// size) or worth attempting anyway (model estimate).
+export function planParts(
+  clips: EstimateClip[],
+  settings: Partial<Settings> = {},
+  opts: { forceReencode?: boolean; music?: boolean } = {},
+  limitBytes: number = 0
+): PartPlan[] {
+  if (!clips.length) return [];
+  const budget = limitBytes > 0 ? limitBytes * SPLIT_BUDGET : Infinity;
+  const target = resolveTarget(clips, settings);
+  const codec: Codec = settings.codec === 'hevc' ? 'hevc' : 'h264';
+  const quality = settings.quality || 'near';
+
+  const parts: PartPlan[] = [];
+  let cur: PartPlan | null = null;
+  clips.forEach((clip, i) => {
+    const w = clipWeightBytes(clip, target, codec, quality, !!opts.forceReencode, !!opts.music);
+    if (cur && cur.estBytes + w.bytes <= budget) {
+      cur.end = i;
+      cur.estBytes += w.bytes;
+      cur.exact = cur.exact && w.exact;
+    } else {
+      cur = { start: i, end: i, estBytes: w.bytes, oversize: w.bytes > budget, exact: w.exact };
+      parts.push(cur);
+    }
+  });
+  return parts;
+}
+
 // Parse one line of ffmpeg `-progress` output into elapsed output seconds.
 export function parseProgressTime(line: string): number | null {
   const m = line.match(/^out_time=(\d+):(\d+):(\d+(?:\.\d+)?)/);

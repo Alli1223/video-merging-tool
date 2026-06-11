@@ -153,6 +153,31 @@ function durationOf(f: string): number {
   console.log('  final verified      :', r4.verified ? 'PASS' : 'FAIL');
   console.log('  full length kept    :', (fixDur > 5 && fixDur < 7) ? 'PASS' : `FAIL (${fixDur.toFixed(2)}s)`);
 
+  // --- Size-limited splitting (max file size per output) ---
+  // A tiny 100 KB limit forces one clip per part: A (~55 KB) fits the packing
+  // budget alone but A+B (~110 KB) doesn't, so the merge must produce
+  // _part1/_part2 files, each under the limit and individually verified.
+  console.log('\n--- Size-split merge (A+B with a ~100 KB per-file limit) ---');
+  const outSplit = path.join(dir, 'merged_split.mp4');
+  const r5 = await ffmpeg.merge({
+    outputPath: outSplit,
+    clips: clips.filter((c) => c.name !== 'C_clip.mp4'),
+    // The UI presets are whole GB; the engine just parses GB -> bytes, which
+    // lets the test use a sub-GB limit small enough to bite on tiny clips.
+    settings: { split: '0.0001' as SplitPref }
+  }, onProg());
+  console.log('\n  result:', JSON.stringify(r5));
+  const partFiles = (r5.parts || []).map((p) => p.path);
+  partFiles.forEach((p) => probe(p));
+  const partSizesOk = (r5.parts || []).every((p) => p.bytes > 0 && p.bytes <= 100000 && fs.existsSync(p.path));
+  const splitDur = partFiles.reduce((s, p) => s + durationOf(p), 0);
+  console.log('  split into 2 parts  :', partFiles.length === 2 ? 'PASS' : `FAIL (${partFiles.length})`);
+  console.log('  parts under limit   :', partSizesOk ? 'PASS' : 'FAIL');
+  console.log('  parts named _partN  :', partFiles.every((p, i) => p.endsWith(`merged_split_part${i + 1}.mp4`)) ? 'PASS' : `FAIL (${partFiles.join(', ')})`);
+  console.log('  parts verified      :', r5.verified ? 'PASS' : 'FAIL');
+  console.log('  combined length ~4s :', (splitDur > 3 && splitDur < 5) ? 'PASS' : `FAIL (${splitDur.toFixed(2)}s)`);
+  console.log('  no single file left :', !fs.existsSync(outSplit) ? 'PASS' : 'FAIL');
+
   fs.rmSync(dir, { recursive: true, force: true });
   console.log('\nAll engine tests completed. Cleaned up temp dir.');
 })().catch((e) => { console.error('\nTEST FAILED:', e); process.exit(1); });

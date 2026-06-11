@@ -19,6 +19,10 @@ drag-and-drop timeline, and merges them into a single file.
   stream-copied clips are CRC-checked against their sources. A clip that turns
   out to be damaged is automatically re-encoded (FFmpeg decodes around the
   damage) so one bad file can't silently ruin the export.
+- **Split for upload limits** — set a max file size (**Settings → Max file
+  size**) and the output is split into `name_part1`, `name_part2`, … at clip
+  boundaries, each file under the limit. Presets cover YouTube's 256 GB upload
+  cap and FAT32's 4 GB, and every part gets the full verification pass.
 - **Smart ordering** — clips are sorted by embedded capture time
   (`creation_time` metadata), falling back to a date in the filename, then the
   file's created/modified time. Each row shows which source was used.
@@ -66,8 +70,8 @@ npm run typecheck   # type-check only (tsc --noEmit), no output emitted
 `npm test` first compiles the project (so a type error anywhere fails the run),
 then uses Node's built-in test runner against the compiled tests in `out/test/`.
 `npm run test:engine` generates a few clips and exercises the lossless,
-re-encode, and background-music merge paths end to end — including a
-deliberately corrupted clip that must be detected and repaired — handy for
+re-encode, background-music, and size-split merge paths end to end — including
+a deliberately corrupted clip that must be detected and repaired — handy for
 confirming the bundled FFmpeg works after installing on a new OS (e.g. Linux).
 
 ## Build a standalone app
@@ -180,6 +184,30 @@ structurally clean and plays smoothly. In the rare case something still can't
 be verified after repair, the file is kept and the status line tells you
 exactly what couldn't be confirmed (also logged via **Settings → Open log
 file**).
+
+## Splitting for upload limits (YouTube's 256 GB, FAT32's 4 GB, …)
+
+Some destinations cap the size of a single file — YouTube rejects uploads over
+**256 GB** (or 12 hours), FAT32 drives can't hold a file over 4 GB. Set
+**Settings → Max file size** and the merge splits the output into
+`name_part1.mp4`, `name_part2.mp4`, … with every file under the limit:
+
+- **Splits happen at clip boundaries** — no clip is ever cut mid-scene, and
+  each part is a normal standalone video (clips that match the target are
+  still stream-copied losslessly within their part).
+- **Parts are planned from per-clip sizes** — exact file sizes for
+  stream-copied clips, a deliberately conservative bitrate model for
+  re-encoded ones. Every finished part is then measured against the limit;
+  if real-world bitrate beat the estimate, the part is automatically split in
+  half and redone, so the limit holds regardless.
+- **Every part gets the full integrity verification** described above, and the
+  timeline summary shows roughly how many files to expect before you merge.
+- If everything fits under the limit, you just get the single file you asked
+  for — no `_part1` suffix.
+
+A merge that can never satisfy the limit (a single clip whose exact size is
+already over it) fails up front with an explanation instead of wasting an
+encode.
 
 ## Project layout
 

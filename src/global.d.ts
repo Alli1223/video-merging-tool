@@ -14,6 +14,9 @@ type Quality = 'lossless' | 'near' | 'high' | 'balanced';
 type EncoderPref = 'auto' | 'nvenc' | 'cpu';
 type ResolutionPref = 'auto' | '720' | '1080' | '1440' | '2160';
 type FpsPref = 'auto' | '24' | '25' | '30' | '50' | '60';
+// Max output file size in GB ('off' = single file). Presets cover the common
+// upload/filesystem caps; the engine treats the value as parseFloat(GB)*1e9.
+type SplitPref = 'off' | '2' | '4' | '10' | '50' | '256';
 type SortMode = 'date-asc' | 'date-desc' | 'name-asc' | 'name-desc';
 type TimeSource = 'metadata' | 'filename' | 'created' | 'modified';
 type LogLevel = 'info' | 'warn' | 'error';
@@ -75,6 +78,9 @@ interface MergeClip extends VideoSpecClip {
   hasVideo?: boolean;
   compatKey: string;
   name?: string;
+  // File size in bytes — used to plan size-limited splitting. Optional: the
+  // engine falls back to statting the file when absent.
+  size?: number;
 }
 interface EstimateClip extends VideoSpecClip {
   size: number;
@@ -113,6 +119,7 @@ interface Settings {
   encoder: EncoderPref;
   codec: Codec;
   quality: Quality;
+  split: SplitPref;
   musicVibe: string;
   musicCrossfade: number;
   musicFadeOut: number;
@@ -144,11 +151,21 @@ interface MergeOptions {
   clips: MergeClip[];
   outputPath: string;
   forceReencode?: boolean;
-  settings?: Settings;
+  settings?: Partial<Settings>;
   music?: MergeMusic | null;
+  // Used by the size-split orchestrator so every part is encoded to the SAME
+  // target (resolved from the full clip list, not just the part's clips).
+  targetOverride?: Target;
 }
 // What the renderer sends over IPC — the main process attaches `settings`.
 type MergePayload = Omit<MergeOptions, 'settings'>;
+
+// One output file of a size-split merge.
+interface PartInfo {
+  path: string;
+  bytes: number;
+  clips: number;
+}
 
 interface MergeResult {
   success: boolean;
@@ -157,12 +174,25 @@ interface MergeResult {
   music?: boolean;
   musicFailed?: boolean;
   canceled?: boolean;
+  /** Present (length ≥ 2) when the output was split into size-limited parts. */
+  parts?: PartInfo[];
   /** Did the final output pass the post-merge integrity verification? */
   verified?: boolean;
   /** Clips that failed their integrity check and were rebuilt by re-encoding. */
   repaired?: RepairedClip[];
   /** Human-readable detail when something could not be verified or fixed. */
   verifyNote?: string;
+}
+
+// A planned size-limited part: clips[start..end] (inclusive indices).
+interface PartPlan {
+  start: number;
+  end: number;
+  estBytes: number;
+  /** This single clip alone exceeds the budget (cannot be split further). */
+  oversize: boolean;
+  /** Every clip in the part is stream-copied, so estBytes is exact. */
+  exact: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +226,9 @@ interface RepairedClip {
 interface Progress {
   percent: number;
   phase?: 'encoding' | 'joining' | 'verifying' | 'music-prep' | 'music';
+  // Set while a size-split merge works on one of its parts.
+  part?: number;
+  partsTotal?: number;
   clip?: number;
   total?: number;
   clipName?: string;

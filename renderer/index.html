@@ -182,7 +182,18 @@
             </select>
           </div>
           <div class="settings-row">
-            <span class="muted setting-note">Clips already at the target are kept lossless; only the others are re-encoded to it.</span>
+            <label class="settings-label" for="setSplit">Max file size</label>
+            <select id="setSplit" title="Split the merged output into multiple files, each below this size. Splits happen at clip boundaries, so no clip is ever cut in the middle.">
+              <option value="off">No limit (single file)</option>
+              <option value="256">256 GB — YouTube upload limit</option>
+              <option value="50">50 GB</option>
+              <option value="10">10 GB</option>
+              <option value="4">4 GB — FAT32 limit</option>
+              <option value="2">2 GB</option>
+            </select>
+          </div>
+          <div class="settings-row">
+            <span class="muted setting-note">Clips already at the target are kept lossless; only the others are re-encoded to it. With a max file size set, the output is split into <i>name</i>_part1, _part2… at clip boundaries, each file under the limit.</span>
           </div>
         </section>
 

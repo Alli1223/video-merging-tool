@@ -72,6 +72,7 @@ interface Elements {
   setEncoder: HTMLSelectElement;
   setCodec: HTMLSelectElement;
   setQuality: HTMLSelectElement;
+  setSplit: HTMLSelectElement;
   encoderInfo: HTMLElement;
   setMusicCrossfade: HTMLSelectElement;
   setMusicFadeOut: HTMLSelectElement;
@@ -92,7 +93,7 @@ let merging = false;
 let lastOutput: string | null = null;
 let outputPath: string | null = null; // user-chosen save location (null = ask at merge time)
 let lastStatusText = '';
-let settings: Settings = { resolution: 'auto', fps: 'auto', encoder: 'auto', codec: 'hevc', quality: 'near', musicVibe: 'mix', musicCrossfade: 4, musicFadeOut: 5, musicVolume: 100 };
+let settings: Settings = { resolution: 'auto', fps: 'auto', encoder: 'auto', codec: 'hevc', quality: 'near', split: 'off', musicVibe: 'mix', musicCrossfade: 4, musicFadeOut: 5, musicVolume: 100 };
 let encoderInfo: EncoderInfo = { h264_nvenc: false, hevc_nvenc: false };
 let mergeStartTime = 0;
 let musicEnabled = false;     // "Add background music" toggle
@@ -133,6 +134,10 @@ function fmtTime(ms: number): string {
       hour: '2-digit', minute: '2-digit'
     });
   } catch { return '—'; }
+}
+
+function baseName(p: string): string {
+  return p.split(/[\\/]/).pop() || p;
 }
 
 const SOURCE_LABEL: Record<TimeSource, string> = {
@@ -346,6 +351,13 @@ function updateSummary(): void {
   let txt = `→ ${plan.t.W}×${plan.t.H} @ ${plan.t.F}fps · ${plan.codec === 'hevc' ? 'HEVC' : 'H.264'} (${plan.encLabel})`;
   if (currentEstimate && currentEstimate.bytes > 0) {
     txt += ` · est. output ≈ ${fmtSize(currentEstimate.bytes)}`;
+    if (settings.split && settings.split !== 'off') {
+      const limit = parseFloat(settings.split) * 1e9;
+      // Mirrors the engine's 0.95 packing budget (src/ffargs.ts). Approximate —
+      // the real count depends on where clip boundaries fall.
+      const n = limit > 0 ? Math.max(1, Math.ceil(currentEstimate.bytes / (limit * 0.95))) : 1;
+      txt += n > 1 ? ` · splits into ~${n} files of ≤${settings.split} GB` : ` · fits in one ≤${settings.split} GB file`;
+    }
   }
   el.outputInfo.textContent = txt;
   el.outputInfo.title = !currentEstimate ? ''
@@ -715,7 +727,8 @@ async function startMerge(): Promise<void> {
       fps: c.fps,
       vcodec: c.vcodec,
       compatKey: c.compatKey,
-      name: c.name
+      name: c.name,
+      size: c.size // used to plan size-limited splitting
     }))
   };
 
@@ -744,7 +757,14 @@ async function startMerge(): Promise<void> {
         const n = res.repaired.length;
         bits.push(`${n} corrupted clip${n > 1 ? 's were' : ' was'} detected and re-encoded to fix ${n > 1 ? 'them' : 'it'}`);
       }
-      let msg = `Done — saved to ${res.outputPath}`;
+      let msg: string;
+      if (res.parts && res.parts.length > 1) {
+        const limitNote = settings.split && settings.split !== 'off' ? `, each under ${settings.split} GB` : '';
+        msg = `Done — split into ${res.parts.length} files${limitNote}:\n`
+          + res.parts.map((p) => `• ${baseName(p.path)} (${fmtSize(p.bytes)})`).join('\n');
+      } else {
+        msg = `Done — saved to ${res.outputPath}`;
+      }
       if (bits.length) msg += ` (${bits.join('; ')})`;
       if (res.verified === false) {
         // Saved, but the integrity pass couldn't confirm the file is clean —
@@ -813,6 +833,7 @@ function fmtRemaining(ms: number): string {
 }
 
 function mergeProgressText(p: Progress): string {
+  const partPrefix = p.part ? `Part ${p.part}${p.partsTotal ? '/' + p.partsTotal : ''} — ` : '';
   let action: string;
   if (p.phase === 'music-prep') {
     action = 'Preparing background music (crossfading tracks into a seamless loop)…';
@@ -840,7 +861,7 @@ function mergeProgressText(p: Progress): string {
     stats.push(`~${fmtRemaining(remaining)} left`);
     stats.push(`finishes ~${fmtClock(Date.now() + remaining)}`);
   }
-  return action + '\n' + stats.join('  ·  ');
+  return partPrefix + action + '\n' + stats.join('  ·  ');
 }
 
 // ---------------------------------------------------------------------------
@@ -1084,6 +1105,7 @@ async function loadSettingsIntoUi(): Promise<void> {
   el.setEncoder.value = settings.encoder || 'auto';
   el.setCodec.value = settings.codec || 'h264';
   el.setQuality.value = settings.quality || 'near';
+  el.setSplit.value = settings.split || 'off';
   el.setMusicCrossfade.value = String(settings.musicCrossfade ?? 4);
   el.setMusicFadeOut.value = String(settings.musicFadeOut ?? 5);
   el.setMusicVolume.value = String(settings.musicVolume ?? 100);
@@ -1101,6 +1123,7 @@ async function onSettingChange(): Promise<void> {
     encoder: el.setEncoder.value as EncoderPref,
     codec: el.setCodec.value as Codec,
     quality: el.setQuality.value as Quality,
+    split: el.setSplit.value as SplitPref,
     musicCrossfade: parseInt(el.setMusicCrossfade.value, 10),
     musicFadeOut: parseInt(el.setMusicFadeOut.value, 10),
     musicVolume: parseInt(el.setMusicVolume.value, 10)
@@ -1177,6 +1200,7 @@ function init(): void {
   el.setEncoder = $<HTMLSelectElement>('setEncoder');
   el.setCodec = $<HTMLSelectElement>('setCodec');
   el.setQuality = $<HTMLSelectElement>('setQuality');
+  el.setSplit = $<HTMLSelectElement>('setSplit');
   el.encoderInfo = $('encoderInfo');
   el.setMusicCrossfade = $<HTMLSelectElement>('setMusicCrossfade');
   el.setMusicFadeOut = $<HTMLSelectElement>('setMusicFadeOut');
@@ -1210,7 +1234,7 @@ function init(): void {
   el.openLogBtn.addEventListener('click', () => window.api.openLogFile());
   el.openLogFolderBtn.addEventListener('click', () => window.api.revealLogFile());
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !el.settingsOverlay.hidden) closeSettings(); });
-  const settingIds: (keyof Elements)[] = ['setResolution', 'setFps', 'setEncoder', 'setCodec', 'setQuality',
+  const settingIds: (keyof Elements)[] = ['setResolution', 'setFps', 'setEncoder', 'setCodec', 'setQuality', 'setSplit',
     'setMusicCrossfade', 'setMusicFadeOut', 'setMusicVolume'];
   settingIds.forEach((id) => {
     el[id].addEventListener('change', onSettingChange);
