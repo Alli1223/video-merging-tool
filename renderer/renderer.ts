@@ -737,10 +737,24 @@ async function startMerge(): Promise<void> {
       setStatus('Merge canceled.', 'error');
     } else {
       setProgress(100);
-      const note = res.musicFailed
-        ? ' (background music could not be added, so it was saved without music)'
-        : (res.music ? ' with background music' : '');
-      setStatus(`Done — saved to ${res.outputPath}${note}`, 'success');
+      const bits: string[] = [];
+      if (res.musicFailed) bits.push('background music could not be added, so it was saved without music');
+      else if (res.music) bits.push('with background music');
+      if (res.repaired && res.repaired.length) {
+        const n = res.repaired.length;
+        bits.push(`${n} corrupted clip${n > 1 ? 's were' : ' was'} detected and re-encoded to fix ${n > 1 ? 'them' : 'it'}`);
+      }
+      let msg = `Done — saved to ${res.outputPath}`;
+      if (bits.length) msg += ` (${bits.join('; ')})`;
+      if (res.verified === false) {
+        // Saved, but the integrity pass couldn't confirm the file is clean —
+        // show neutrally (not green) with the reason.
+        msg += `\n⚠ The integrity check could not confirm the output is fully clean${res.verifyNote ? ': ' + res.verifyNote : '.'}`;
+        setStatus(msg);
+      } else {
+        if (res.verified) msg += ' · integrity verified ✓';
+        setStatus(msg, 'success');
+      }
       el.showBtn.hidden = false;
     }
   } catch (e) {
@@ -804,6 +818,10 @@ function mergeProgressText(p: Progress): string {
     action = 'Preparing background music (crossfading tracks into a seamless loop)…';
   } else if (p.phase === 'music') {
     action = 'Adding background music to the video (copying video, no re-encode)…';
+  } else if (p.phase === 'verifying') {
+    action = p.clip
+      ? `Checking clip ${p.clip}/${p.total} for corruption (decode + CRC): ${p.clipName || ''}`
+      : 'Verifying the merged video — decoding every frame to catch corruption…';
   } else if (p.phase === 'joining') {
     action = 'Joining clips losslessly (stream copy)…';
   } else if (p.action === 'copy') {

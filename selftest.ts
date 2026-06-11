@@ -87,6 +87,7 @@ function durationOf(f: string): number {
   console.log('\n  result:', JSON.stringify(r1));
   probe(outCopy);
   console.log('  output exists  :', fs.existsSync(outCopy) ? 'PASS' : 'FAIL');
+  console.log('  integrity pass :', r1.verified ? 'PASS' : 'FAIL');
 
   // --- Re-encode fallback on all three (mixed formats + missing audio) ---
   console.log('\n--- Re-encode merge (A+B+C, C has no audio) ---');
@@ -95,6 +96,7 @@ function durationOf(f: string): number {
   console.log('\n  result:', JSON.stringify(r2));
   probe(outRe);
   console.log('  output exists  :', fs.existsSync(outRe) ? 'PASS' : 'FAIL');
+  console.log('  integrity pass :', r2.verified ? 'PASS' : 'FAIL');
 
   // --- Background music: loop + crossfade a small pool under the merged video ---
   console.log('\n--- Merge with background music (A+B + 2 local tracks, no network) ---');
@@ -116,7 +118,40 @@ function durationOf(f: string): number {
   console.log('  output exists  :', fs.existsSync(outMusic) ? 'PASS' : 'FAIL');
   console.log('  has audio track:', aCount >= 1 ? 'PASS' : `FAIL (${aCount})`);
   console.log('  music flag set :', r3 && r3.music ? 'PASS' : 'FAIL');
+  console.log('  integrity pass :', r3.verified ? 'PASS' : 'FAIL');
   console.log('  trimmed to video length (~4s):', (mDur > 3 && mDur < 5) ? 'PASS' : `FAIL (${mDur.toFixed(2)}s)`);
+
+  // --- Corruption detection & repair ---
+  // D is a byte-identical copy of A with a 4 KB hole blown into its packet
+  // data: the container index (moov, at the end) stays valid, so probing and
+  // stream-copying "succeed" — exactly the silent-corruption case the
+  // verification pass exists for. The merge must detect it, re-encode just
+  // that clip, and produce a verified output of the full length.
+  console.log('\n--- Corruption detection & repair (A+B+D, D = damaged copy of A) ---');
+  const cDir = path.join(dir, 'corrupt-test');
+  fs.mkdirSync(cDir);
+  fs.copyFileSync(path.join(dir, 'A_clip.mp4'), path.join(cDir, 'A_clip.mp4'));
+  fs.copyFileSync(path.join(dir, 'B_clip.mp4'), path.join(cDir, 'B_clip.mp4'));
+  const dPath = path.join(cDir, 'D_clip.mp4');
+  fs.copyFileSync(path.join(dir, 'A_clip.mp4'), dPath);
+  const dSize = fs.statSync(dPath).size;
+  const fd = fs.openSync(dPath, 'r+');
+  fs.writeSync(fd, Buffer.alloc(4096), 0, 4096, Math.floor(dSize * 0.45));
+  fs.closeSync(fd);
+  console.log('  corrupted D_clip.mp4 (zeroed 4 KB at 45% of', dSize, 'bytes)');
+
+  const { clips: cClips } = await scanDirectory(cDir);
+  console.log('  scanned', cClips.length, 'clips — same format, so the lossless copy path is attempted first');
+  const outFix = path.join(cDir, 'merged_fixed.mp4');
+  const r4 = await ffmpeg.merge({ outputPath: outFix, clips: cClips }, onProg());
+  console.log('\n  result:', JSON.stringify(r4));
+  probe(outFix);
+  const repairedNames = (r4.repaired || []).map((r) => r.name);
+  const fixDur = durationOf(outFix);
+  console.log('  output exists       :', fs.existsSync(outFix) ? 'PASS' : 'FAIL');
+  console.log('  corruption repaired :', repairedNames.includes('D_clip.mp4') ? 'PASS' : `FAIL (${JSON.stringify(r4.repaired || [])})`);
+  console.log('  final verified      :', r4.verified ? 'PASS' : 'FAIL');
+  console.log('  full length kept    :', (fixDur > 5 && fixDur < 7) ? 'PASS' : `FAIL (${fixDur.toFixed(2)}s)`);
 
   fs.rmSync(dir, { recursive: true, force: true });
   console.log('\nAll engine tests completed. Cleaned up temp dir.');

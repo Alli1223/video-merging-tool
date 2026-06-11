@@ -327,6 +327,70 @@ export function buildMusicMuxArgs(
 }
 
 // ---------------------------------------------------------------------------
+// Output integrity verification (decode check + CRC content compare)
+// ---------------------------------------------------------------------------
+// A produced file is checked by fully decoding it into the null muxer: any
+// bitstream damage surfaces as `-v error` lines on stderr, and the final
+// -progress out_time reveals how much was actually decodable (truncation
+// check). For stream-copied video, a CRC-32 of the decoded frames (ffmpeg's
+// `crc` muxer) can additionally be compared against the source file — a
+// container-independent "the content is exactly what the source contains"
+// check, which catches silent write corruption that still happens to decode.
+
+// Decode-verify args for a produced file. When crcOutPath is given, a CRC-32
+// of the decoded video frames is also written there (a tiny text file of the
+// form "CRC=0x12345678"). -noautorotate keeps the decoded frames identical
+// between a source and a remuxed copy when rotation metadata is involved.
+export function buildVerifyArgs(file: string, crcOutPath?: string): string[] {
+  const args = ['-v', 'error', '-noautorotate', '-i', file];
+  if (crcOutPath) args.push('-map', '0:v:0', '-f', 'crc', crcOutPath);
+  args.push('-map', '0:v:0?', '-map', '0:a?', '-f', 'null', '-');
+  return args;
+}
+
+// CRC-32 of the decoded video frames only — used on the SOURCE side of a
+// copied-clip comparison (decode errors here mean the source itself is bad).
+export function buildVideoCrcArgs(file: string, crcOutPath: string): string[] {
+  return ['-v', 'error', '-noautorotate', '-i', file, '-map', '0:v:0', '-f', 'crc', crcOutPath];
+}
+
+// Parse the crc muxer's output ("CRC=0x12345678") to a normalized string.
+export function parseCrcOutput(content: string | null | undefined): string | null {
+  const m = String(content || '').match(/CRC=(0x[0-9A-Fa-f]{8})/);
+  return m ? m[1].toLowerCase() : null;
+}
+
+// How far short a decoded duration may fall before it counts as truncation.
+// Resample padding / fps rounding shift things slightly, so be generous: this
+// catches "half the video is missing", not sub-second drift.
+export function durationTolerance(expected: number): number {
+  return Math.max(2, expected * 0.05);
+}
+
+// Pure verdict over everything a verification run gathered. Only a SHORT
+// duration is flagged (truncation); a longer-than-expected file plays fine.
+// The CRC pair is compared only when both sides are present.
+export function assessIntegrity(input: IntegrityInput): VerifyReport {
+  const issues: VerifyIssue[] = [];
+  if (input.exitCode !== 0) {
+    issues.push({ kind: 'process', detail: `verification decoder exited with code ${input.exitCode}` });
+  }
+  if (input.errorCount > 0) {
+    const sample = (input.errorSample || []).slice(0, 3).join(' | ');
+    issues.push({ kind: 'decode', detail: `${input.errorCount} decode error(s)${sample ? ' — ' + sample : ''}` });
+  }
+  const expected = input.expectedDuration || 0;
+  if (expected > 0 && input.decodedDuration != null &&
+      input.decodedDuration < expected - durationTolerance(expected)) {
+    issues.push({ kind: 'duration', detail: `decodable length is ${input.decodedDuration.toFixed(1)}s, expected ~${expected.toFixed(1)}s` });
+  }
+  if (input.crc && input.expectedCrc && input.crc !== input.expectedCrc) {
+    issues.push({ kind: 'crc', detail: `video content CRC ${input.crc} does not match the source's ${input.expectedCrc}` });
+  }
+  return { ok: issues.length === 0, issues };
+}
+
+// ---------------------------------------------------------------------------
 // Output size estimation
 // ---------------------------------------------------------------------------
 

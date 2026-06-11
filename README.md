@@ -14,6 +14,11 @@ drag-and-drop timeline, and merges them into a single file.
 - **NVIDIA GPU (NVENC) encoding** — hardware-accelerated **H.264 or HEVC/H.265**,
   auto-detected with an automatic CPU (x264/x265) fallback. Your preferences are
   saved between sessions.
+- **Integrity verification & automatic repair** — after every merge the output
+  is fully decoded to catch corruption (decode errors, truncation), and
+  stream-copied clips are CRC-checked against their sources. A clip that turns
+  out to be damaged is automatically re-encoded (FFmpeg decodes around the
+  damage) so one bad file can't silently ruin the export.
 - **Smart ordering** — clips are sorted by embedded capture time
   (`creation_time` metadata), falling back to a date in the filename, then the
   file's created/modified time. Each row shows which source was used.
@@ -61,8 +66,9 @@ npm run typecheck   # type-check only (tsc --noEmit), no output emitted
 `npm test` first compiles the project (so a type error anywhere fails the run),
 then uses Node's built-in test runner against the compiled tests in `out/test/`.
 `npm run test:engine` generates a few clips and exercises the lossless,
-re-encode, and background-music merge paths end to end — handy for confirming the
-bundled FFmpeg works after installing on a new OS (e.g. Linux).
+re-encode, and background-music merge paths end to end — including a
+deliberately corrupted clip that must be detected and repaired — handy for
+confirming the bundled FFmpeg works after installing on a new OS (e.g. Linux).
 
 ## Build a standalone app
 
@@ -142,6 +148,39 @@ almost always match. When they don't, the **⚠ Mixed formats** badge appears an
 the app switches to the re-encode path, which re-renders the video and is
 therefore not bit-for-bit lossless (though CRF 18 is visually near-lossless).
 
+## Integrity verification & automatic repair
+
+Stream copy (`-c copy`) never decodes the footage, so a source file with a
+damaged bitstream — a camera that lost power, a flaky SD card, a bad download —
+would previously be copied into the merged file verbatim, and FFmpeg would
+still exit successfully. The merge now ends with a verification pass instead of
+taking that on faith:
+
+1. **Per-clip checks (during the merge).** Every intermediate segment is fully
+   decoded with `-v error`; any decode error or truncated duration flags it.
+   Segments whose video was stream-copied are additionally **CRC-32 compared
+   against their source** (FFmpeg's `crc` muxer over the decoded frames, so the
+   comparison is container-independent) — content has to match the source
+   exactly.
+2. **Whole-file check (after the merge).** The final output is decoded end to
+   end and its decodable length compared with the expected total, so a damaged
+   source copied through, a bad join, or a truncated write is caught before you
+   ever hit play.
+3. **Automatic repair.** A clip that fails its check is rebuilt with a re-encode:
+   decoding conceals the damaged regions instead of copying them, producing a
+   clean, fully playable bitstream. If a lossless merge fails the whole-file
+   check, it is automatically redone per-clip so only the genuinely broken
+   clips lose their lossless status. The result panel reports what was repaired
+   (e.g. *"1 corrupted clip was detected and re-encoded"*) and ends with
+   *"integrity verified ✓"*.
+
+Heavily damaged footage may still show visual artifacts where data was
+destroyed — that information is gone — but the exported file itself is
+structurally clean and plays smoothly. In the rare case something still can't
+be verified after repair, the file is kept and the status line tells you
+exactly what couldn't be confirmed (also logged via **Settings → Open log
+file**).
+
 ## Project layout
 
 | File | Role |
@@ -150,8 +189,8 @@ therefore not bit-for-bit lossless (though CRF 18 is visually near-lossless).
 | `preload.ts` | Safe `window.api` bridge to the renderer (typed against the `Api` contract). |
 | `src/global.d.ts` | Shared ambient types: the domain model and the `window.api` IPC contract. |
 | `src/metadata.ts` | Pure logic: file detection, capture-time resolution, compatibility keys, ordering. |
-| `src/ffargs.ts` | Pure logic: FFmpeg argument/filter-graph construction and progress parsing. |
-| `src/ffmpeg.ts` | Spawns ffprobe/ffmpeg for probing, thumbnails, and both merge paths. |
+| `src/ffargs.ts` | Pure logic: FFmpeg argument/filter-graph construction, progress parsing, and the integrity verdict (`assessIntegrity`). |
+| `src/ffmpeg.ts` | Spawns ffprobe/ffmpeg for probing, thumbnails, both merge paths, and the verification/repair pass. |
 | `src/scanner.ts` | Directory scan that wires `ffmpeg` + `metadata` together. |
 | `src/music.ts` | Fetches & caches CC0 background music from the Internet Archive. |
 | `renderer/` | The UI: `index.html`, `styles.css`, and `renderer.ts` (clip list, timeline, controls). |

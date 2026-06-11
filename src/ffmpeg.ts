@@ -7,7 +7,8 @@ import ffprobeStatic from 'ffprobe-static';
 import {
   parseFps, concatListContent, buildCopyArgs, buildReencodeArgs,
   resolveTarget, buildSegmentArgs, parseProgressTime, computePercent,
-  planMusic, buildLoopUnitArgs, buildMusicMuxArgs
+  planMusic, buildLoopUnitArgs, buildMusicMuxArgs,
+  buildVerifyArgs, buildVideoCrcArgs, parseCrcOutput, assessIntegrity, durationTolerance
 } from './ffargs';
 import * as log from './logger';
 
@@ -302,6 +303,138 @@ function runFfmpeg(args: string[], totalDuration: number, onProgress: ProgressCb
   });
 }
 
+// ---------------------------------------------------------------------------
+// Integrity verification (decode check + CRC content compare)
+// ---------------------------------------------------------------------------
+
+interface VerifyRunResult {
+  exitCode: number | null;
+  errorCount: number;
+  errorSample: string[];
+  decodedDuration: number | null;
+}
+
+// Run ffmpeg purely as a decoder/verifier. Unlike runFfmpeg, a non-zero exit
+// is data (the file is damaged), not an exception; decode errors are collected
+// from stderr (bounded), and -progress provides both a progress callback and
+// the actually-decodable duration (its last out_time).
+function runVerifyFfmpeg(args: string[], totalDuration: number, onProgress: ProgressCb): Promise<VerifyRunResult> {
+  return new Promise((resolve, reject) => {
+    const fullArgs = ['-hide_banner', '-y', '-progress', 'pipe:1', '-nostats', ...args];
+    log.info('Verifying with FFmpeg:', ffmpegBin(), fullArgs.join(' '));
+    const proc = spawn(ffmpegBin(), fullArgs);
+    currentProc = proc;
+
+    let stdoutBuf = '';
+    let lastSeconds: number | null = null;
+    let errBuf = '';
+    let errorCount = 0;
+    const errorSample: string[] = [];
+
+    const noteErrorLine = (line: string): void => {
+      const t = line.trim();
+      if (!t) return;
+      errorCount++;
+      if (errorSample.length < 5) errorSample.push(t.slice(0, 300));
+    };
+
+    proc.stdout.on('data', (d: Buffer) => {
+      stdoutBuf += d.toString();
+      const lines = stdoutBuf.split(/\r?\n/);
+      stdoutBuf = lines.pop() ?? '';
+      for (const line of lines) {
+        const s = parseProgressTime(line);
+        if (s != null) {
+          lastSeconds = s;
+          onProgress({ percent: computePercent(s, totalDuration), seconds: s, totalDuration });
+        }
+      }
+    });
+
+    proc.stderr.on('data', (d: Buffer) => {
+      errBuf += d.toString();
+      const lines = errBuf.split(/\r?\n/);
+      errBuf = lines.pop() ?? '';
+      for (const line of lines) noteErrorLine(line);
+    });
+
+    proc.on('error', (e) => {
+      currentProc = null;
+      reject(e);
+    });
+
+    proc.on('close', (code) => {
+      currentProc = null;
+      if (errBuf.trim()) noteErrorLine(errBuf);
+      if (canceled) return reject(canceledError());
+      resolve({ exitCode: code, errorCount, errorSample, decodedDuration: lastSeconds });
+    });
+  });
+}
+
+function readTextSafe(p: string): string | null {
+  try { return fs.readFileSync(p, 'utf8'); } catch { return null; }
+}
+
+function summarizeIssues(r: VerifyReport): string {
+  return r.issues.map((i) => `${i.kind}: ${i.detail}`).join('; ') || 'unknown issue';
+}
+
+interface VerifyFileOpts {
+  expectedDuration?: number;
+  // When set, also CRC-compare the decoded video frames against this file
+  // (used for stream-copied segments, whose content must equal the source's).
+  crcCompareSource?: string | null;
+  onProgress?: ProgressCb;
+}
+
+// Integrity-check one produced file: decode every stream and flag decode
+// errors, confirm the decodable duration, and (for stream-copied video)
+// compare a CRC-32 of the decoded frames against the source file.
+export async function verifyFile(file: string, opts: VerifyFileOpts = {}): Promise<VerifyReport> {
+  assertBinaries();
+  const onProg: ProgressCb = opts.onProgress || (() => {});
+  const expected = opts.expectedDuration || 0;
+  const wantCrc = !!opts.crcCompareSource;
+  const crcBase = path.join(os.tmpdir(), `vmt-crc-${process.pid}-${Date.now()}`);
+  const outCrcPath = wantCrc ? crcBase + '-out.txt' : undefined;
+
+  const run = await runVerifyFfmpeg(buildVerifyArgs(file, outCrcPath), expected, onProg);
+  let crc: string | null = null;
+  let expectedCrc: string | null = null;
+  const extraIssues: VerifyIssue[] = [];
+
+  if (outCrcPath) {
+    crc = parseCrcOutput(readTextSafe(outCrcPath));
+    safeUnlink(outCrcPath);
+  }
+
+  // The CRC compare is only meaningful when the file itself decoded cleanly
+  // (a damaged copy already fails on its own decode errors above).
+  if (wantCrc && run.exitCode === 0 && run.errorCount === 0) {
+    const srcCrcPath = crcBase + '-src.txt';
+    const srcRun = await runVerifyFfmpeg(buildVideoCrcArgs(opts.crcCompareSource as string, srcCrcPath), expected, onProg);
+    expectedCrc = parseCrcOutput(readTextSafe(srcCrcPath));
+    safeUnlink(srcCrcPath);
+    if (srcRun.exitCode !== 0 || !crc || !expectedCrc) {
+      extraIssues.push({ kind: 'crc', detail: 'could not CRC-compare the copied video against its source' });
+      expectedCrc = null;
+    }
+  }
+
+  const report = assessIntegrity({
+    exitCode: run.exitCode,
+    errorCount: run.errorCount,
+    errorSample: run.errorSample,
+    decodedDuration: run.decodedDuration,
+    expectedDuration: expected || null,
+    crc,
+    expectedCrc
+  });
+  if (extraIssues.length) return { ok: false, issues: [...report.issues, ...extraIssues] };
+  return report;
+}
+
 async function mergeCopy(clips: { path: string }[], outputPath: string, totalDuration: number, onProgress: ProgressCb): Promise<MergeResult> {
   const listFile = path.join(os.tmpdir(), `vmt-concat-${process.pid}-${Date.now()}.txt`);
   fs.writeFileSync(listFile, concatListContent(clips), 'utf8');
@@ -345,38 +478,95 @@ async function mergeHybrid(clips: MergeClip[], outputPath: string, target: Targe
   }
   log.info('Hybrid merge working dir:', tmpDir);
   const segments: string[] = [];
+  const repaired: RepairedClip[] = [];
+  const unresolved: string[] = [];
   try {
     let done = 0;
     let useNvencNow = encOpts.useNvenc;
     for (let i = 0; i < clips.length; i++) {
       if (canceled) { throw canceledError(); }
       const clip = clips[i];
+      const clipName = clip.name || path.basename(String(clip.path || ''));
       const seg = path.join(tmpDir, `seg-${String(i).padStart(4, '0')}.mp4`);
-      const copyVideo = !forceReencode && matchesTargetVideo(clip, target, codecName);
+      let copyNow = !forceReencode && matchesTargetVideo(clip, target, codecName);
       const base = done;
       const onSeg: ProgressCb = (p) => {
         // Per-clip processing occupies 0..92% of the progress bar.
         onProgress({
           percent: computePercent(base + (p.seconds || 0), totalDuration) * 0.92,
           phase: 'encoding', clip: i + 1, total: clips.length,
-          clipName: clip.name || path.basename(String(clip.path || '')),
-          action: copyVideo ? 'copy' : 'encode',
+          clipName,
+          action: copyNow ? 'copy' : 'encode',
           encoder: useNvencNow ? 'gpu' : 'cpu',
           codec: encOpts.codec,
           fps: p.fps, speed: p.speed
         });
       };
-      try {
-        await runFfmpeg(buildSegmentArgs(clip, target, { ...encOpts, useNvenc: useNvencNow }, seg, copyVideo), clip.duration || 0, onSeg);
-      } catch (e) {
-        if (canceled || copyVideo || !useNvencNow) throw e;
-        // GPU encode failed (e.g. resolution/codec the GPU can't do) — drop to
-        // CPU for this clip and the rest of the merge.
-        log.warn(`GPU encode failed for clip ${i + 1}; retrying this and the remaining clips on CPU:`, errMsg(e));
-        useNvencNow = false;
+      const onVerify: ProgressCb = (p) => {
+        // The check decodes the just-written segment, so it advances within
+        // the same slice of the bar the clip already occupies.
+        onProgress({
+          percent: computePercent(base + (p.seconds || 0), totalDuration) * 0.92,
+          phase: 'verifying', clip: i + 1, total: clips.length, clipName
+        });
+      };
+
+      const buildSegment = async (): Promise<void> => {
+        try {
+          await runFfmpeg(buildSegmentArgs(clip, target, { ...encOpts, useNvenc: useNvencNow }, seg, copyNow), clip.duration || 0, onSeg);
+        } catch (e) {
+          if (canceled) throw e;
+          if (copyNow) {
+            // Even the lossless remux failed — the source bitstream is suspect,
+            // so fall back to a clean re-encode of this clip.
+            log.warn(`Stream-copying clip ${i + 1} failed; re-encoding it instead:`, errMsg(e));
+            copyNow = false;
+            repaired.push({ name: clipName, reason: 'process' });
+            safeUnlink(seg);
+            await buildSegment();
+            return;
+          }
+          if (!useNvencNow) throw e;
+          // GPU encode failed (e.g. resolution/codec the GPU can't do) — drop to
+          // CPU for this clip and the rest of the merge.
+          log.warn(`GPU encode failed for clip ${i + 1}; retrying this and the remaining clips on CPU:`, errMsg(e));
+          useNvencNow = false;
+          safeUnlink(seg);
+          await runFfmpeg(buildSegmentArgs(clip, target, { ...encOpts, useNvenc: false }, seg, false), clip.duration || 0, onSeg);
+        }
+      };
+      await buildSegment();
+
+      // Integrity-check the segment we just produced. A stream-copied segment
+      // is additionally CRC-compared against its source, so damage in the
+      // source (or a bad write) can't ride a lossless copy into the output.
+      let report = await verifyFile(seg, {
+        expectedDuration: clip.duration || 0,
+        crcCompareSource: copyNow ? clip.path : null,
+        onProgress: onVerify
+      });
+      if (!report.ok) {
+        const reason: VerifyIssueKind = report.issues[0] ? report.issues[0].kind : 'decode';
+        log.warn(`Clip ${i + 1}/${clips.length} (${clipName}) failed its integrity check — ${summarizeIssues(report)} — rebuilding it with a re-encode.`);
+        // Re-encoding decodes around damaged regions (error concealment)
+        // instead of copying them; a corrupt GPU encode is redone on the CPU.
+        const wasCopy = copyNow;
+        copyNow = false;
+        if (!wasCopy) useNvencNow = false;
         safeUnlink(seg);
-        await runFfmpeg(buildSegmentArgs(clip, target, { ...encOpts, useNvenc: false }, seg, false), clip.duration || 0, onSeg);
+        await buildSegment();
+        report = await verifyFile(seg, { expectedDuration: clip.duration || 0, onProgress: onVerify });
+        if (report.ok) {
+          if (!repaired.some((r) => r.name === clipName)) repaired.push({ name: clipName, reason });
+          log.info(`Clip ${i + 1} (${clipName}) repaired by re-encoding (original problem: ${reason}).`);
+        } else {
+          // Still failing after a rebuild (e.g. the source is too damaged to
+          // decode at full length). Keep the best effort and tell the user.
+          unresolved.push(`${clipName} (${summarizeIssues(report)})`);
+          log.error(`Clip ${i + 1} (${clipName}) still fails verification after re-encoding: ${summarizeIssues(report)}`);
+        }
       }
+
       done += clip.duration || 0;
       segments.push(seg);
     }
@@ -391,7 +581,10 @@ async function mergeHybrid(clips: MergeClip[], outputPath: string, target: Targe
       log.warn('Stream-copy join failed; falling back to a full re-encode:', errMsg(joinErr));
       await mergeReencode(clips, outputPath, target, encOpts, totalDuration, onProgress);
     }
-    return { success: true, mode: 'hybrid', outputPath };
+    const result: MergeResult = { success: true, mode: 'hybrid', outputPath };
+    if (repaired.length) result.repaired = repaired;
+    if (unresolved.length) result.verifyNote = 'could not fully verify ' + unresolved.join('; ');
+    return result;
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
@@ -508,11 +701,52 @@ export async function merge(opts: MergeOptions, onProgress: ProgressCb): Promise
   try {
     const allMatch = clips.every((c) => matchesTargetVideo(c, target, codec));
     const allCompat = new Set(clips.map((c) => c.compatKey)).size === 1;
+
+    // The merge work fills 0..86% of the (video-side) progress and the final
+    // verification pass 86..100%. With music enabled both sit inside the
+    // 0..90% video share set up above.
+    const workProgress: ProgressCb = (p) => videoProgress({ ...p, percent: (p.percent || 0) * 0.86 });
+    const verifyProgress: ProgressCb = (p) =>
+      videoProgress({ percent: 86 + (p.percent || 0) * 0.14, phase: 'verifying', seconds: p.seconds, totalDuration });
+
     let result: MergeResult;
     if (!forceReencode && allMatch && allCompat) {
-      result = await mergeCopy(clips, videoTarget, totalDuration, videoProgress);
+      result = await mergeCopy(clips, videoTarget, totalDuration, workProgress);
     } else {
-      result = await mergeHybrid(clips, videoTarget, target, encOpts, codec, totalDuration, videoProgress, forceReencode);
+      result = await mergeHybrid(clips, videoTarget, target, encOpts, codec, totalDuration, workProgress, forceReencode);
+    }
+
+    // Final integrity pass: decode the whole merged file end to end so any
+    // corruption (a damaged source copied through, a truncated write, a bad
+    // join) is caught now rather than discovered during playback.
+    log.info('Verifying merged output:', videoTarget);
+    let report = await verifyFile(videoTarget, { expectedDuration: totalDuration, onProgress: verifyProgress });
+    if (!report.ok) {
+      log.warn(`Merged output failed verification (${summarizeIssues(report)}); repairing.`);
+      const prev = result;
+      safeUnlink(videoTarget);
+      if (prev.mode === 'copy') {
+        // Redo the merge per clip: each clip is individually verified and only
+        // the damaged ones get re-encoded, so the repair touches just what is
+        // actually broken.
+        result = await mergeHybrid(clips, videoTarget, target, encOpts, codec, totalDuration, workProgress, forceReencode);
+      } else {
+        // The per-clip path already verified its segments, so the remaining
+        // suspect is the join — rebuild with the single-pass re-encoder.
+        result = await mergeReencode(clips, videoTarget, target, encOpts, totalDuration, workProgress);
+        if (prev.repaired) result.repaired = prev.repaired;
+        if (prev.verifyNote) result.verifyNote = prev.verifyNote;
+      }
+      report = await verifyFile(videoTarget, { expectedDuration: totalDuration, onProgress: verifyProgress });
+    }
+    result.verified = report.ok;
+    if (!report.ok) {
+      result.verifyNote = [result.verifyNote, summarizeIssues(report)].filter(Boolean).join('; ');
+      log.error('Merged output still fails verification after repair; keeping the best effort.', result.verifyNote);
+    } else if (result.repaired && result.repaired.length) {
+      log.info('Merged output verified OK. Repaired clips:', result.repaired.map((r) => `${r.name} (${r.reason})`).join(', '));
+    } else {
+      log.info('Merged output verified OK.');
     }
 
     if (music) {
@@ -521,6 +755,12 @@ export async function merge(opts: MergeOptions, onProgress: ProgressCb): Promise
           videoPath: videoTarget, trackPaths: music.trackPaths, outputPath,
           totalDuration, options: music.options || {}
         }, (p) => onProgress({ ...p, percent: 90 + (p.percent || 0) * 0.1 }));
+        // Cheap sanity check on the muxed file (its video stream was already
+        // verified above): make sure the write wasn't truncated.
+        const muxDur = (await probeFile(outputPath)).duration || 0;
+        if (totalDuration > 0 && muxDur < totalDuration - durationTolerance(totalDuration)) {
+          throw new Error(`music mux looks truncated (${muxDur.toFixed(1)}s of ~${totalDuration.toFixed(1)}s)`);
+        }
         safeUnlink(videoTarget);
         result = { ...result, outputPath, music: true };
       } catch (musicErr) {

@@ -157,12 +157,45 @@ interface MergeResult {
   music?: boolean;
   musicFailed?: boolean;
   canceled?: boolean;
+  /** Did the final output pass the post-merge integrity verification? */
+  verified?: boolean;
+  /** Clips that failed their integrity check and were rebuilt by re-encoding. */
+  repaired?: RepairedClip[];
+  /** Human-readable detail when something could not be verified or fixed. */
+  verifyNote?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Output integrity verification
+// ---------------------------------------------------------------------------
+type VerifyIssueKind = 'decode' | 'duration' | 'crc' | 'process';
+interface VerifyIssue {
+  kind: VerifyIssueKind;
+  detail: string;
+}
+interface VerifyReport {
+  ok: boolean;
+  issues: VerifyIssue[];
+}
+// Everything a verification run gathers, fed to the pure assessIntegrity().
+interface IntegrityInput {
+  exitCode: number | null;
+  errorCount: number;
+  errorSample: string[];
+  decodedDuration: number | null;
+  expectedDuration?: number | null;
+  crc?: string | null;
+  expectedCrc?: string | null;
+}
+interface RepairedClip {
+  name: string;
+  reason: VerifyIssueKind;
 }
 
 // Streamed merge progress (a superset across all phases).
 interface Progress {
   percent: number;
-  phase?: 'encoding' | 'joining' | 'music-prep' | 'music';
+  phase?: 'encoding' | 'joining' | 'verifying' | 'music-prep' | 'music';
   clip?: number;
   total?: number;
   clipName?: string;

@@ -5,7 +5,8 @@ import {
   buildCopyArgs, reencodeTarget, buildReencodeArgs, parseProgressTime, computePercent,
   resolveTarget, buildVideoEncodeArgs, buildSegmentArgs,
   planMusic, buildLoopUnitArgs, buildMusicMuxArgs,
-  estimatedVideoBitrate, estimateMergeBytes
+  estimatedVideoBitrate, estimateMergeBytes,
+  buildVerifyArgs, buildVideoCrcArgs, parseCrcOutput, durationTolerance, assessIntegrity
 } from '../src/ffargs';
 
 test('parseFps handles fractions and edge cases', () => {
@@ -312,4 +313,82 @@ test('estimatedVideoBitrate scales with resolution and is lower for HEVC', () =>
   assert.ok(hevc < h264);          // HEVC is more efficient
   assert.ok(h264_4k > h264);       // 4K needs more than 1080p
   assert.ok(h264 > 0);
+});
+
+test('buildVerifyArgs decodes all streams into the null muxer', () => {
+  const s = buildVerifyArgs('/x/out.mp4').join(' ');
+  assert.ok(s.includes('-v error'));                      // only real errors on stderr
+  assert.ok(s.includes('-noautorotate'));                 // deterministic frames vs the source
+  assert.ok(s.includes('-i /x/out.mp4'));
+  assert.ok(s.includes('-map 0:v:0? -map 0:a? -f null -')); // decode-check video + audio
+  assert.ok(!s.includes('-f crc'));                       // no CRC sink unless asked
+});
+
+test('buildVerifyArgs adds a video CRC sink when a crc path is given', () => {
+  const s = buildVerifyArgs('/x/seg.mp4', '/tmp/crc.txt').join(' ');
+  assert.ok(s.includes('-map 0:v:0 -f crc /tmp/crc.txt'));
+  assert.ok(s.includes('-f null -'));                     // still decode-checks everything
+});
+
+test('buildVideoCrcArgs hashes only the first video stream', () => {
+  const s = buildVideoCrcArgs('/src.mp4', '/tmp/c.txt').join(' ');
+  assert.ok(s.includes('-i /src.mp4'));
+  assert.ok(s.includes('-map 0:v:0 -f crc /tmp/c.txt'));
+  assert.ok(!s.includes('null'));
+});
+
+test('parseCrcOutput extracts and normalizes the CRC line', () => {
+  assert.equal(parseCrcOutput('CRC=0xDEADBEEF\n'), '0xdeadbeef');
+  assert.equal(parseCrcOutput('CRC=0x00000000'), '0x00000000');
+  assert.equal(parseCrcOutput('no crc here'), null);
+  assert.equal(parseCrcOutput(''), null);
+  assert.equal(parseCrcOutput(null), null);
+});
+
+test('durationTolerance is at least 2s and scales at 5%', () => {
+  assert.equal(durationTolerance(10), 2);
+  assert.equal(durationTolerance(0), 2);
+  assert.equal(durationTolerance(200), 10);
+});
+
+test('assessIntegrity passes a clean run', () => {
+  const r = assessIntegrity({
+    exitCode: 0, errorCount: 0, errorSample: [],
+    decodedDuration: 59.8, expectedDuration: 60
+  });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.issues, []);
+});
+
+test('assessIntegrity flags decode errors, truncation, crc mismatch and a bad exit', () => {
+  const decode = assessIntegrity({ exitCode: 0, errorCount: 3, errorSample: ['err A', 'err B'], decodedDuration: 60, expectedDuration: 60 });
+  assert.equal(decode.ok, false);
+  assert.equal(decode.issues[0].kind, 'decode');
+  assert.ok(decode.issues[0].detail.includes('err A'));   // sample surfaces in the detail
+
+  const trunc = assessIntegrity({ exitCode: 0, errorCount: 0, errorSample: [], decodedDuration: 30, expectedDuration: 60 });
+  assert.equal(trunc.ok, false);
+  assert.equal(trunc.issues[0].kind, 'duration');
+
+  const crc = assessIntegrity({
+    exitCode: 0, errorCount: 0, errorSample: [], decodedDuration: 60, expectedDuration: 60,
+    crc: '0x11111111', expectedCrc: '0x22222222'
+  });
+  assert.equal(crc.ok, false);
+  assert.equal(crc.issues[0].kind, 'crc');
+
+  const proc = assessIntegrity({ exitCode: 1, errorCount: 0, errorSample: [], decodedDuration: null });
+  assert.equal(proc.ok, false);
+  assert.equal(proc.issues[0].kind, 'process');
+});
+
+test('assessIntegrity tolerates drift and over-length, and skips absent checks', () => {
+  // a small shortfall within tolerance is fine
+  assert.ok(assessIntegrity({ exitCode: 0, errorCount: 0, errorSample: [], decodedDuration: 59, expectedDuration: 60 }).ok);
+  // longer than expected is not corruption
+  assert.ok(assessIntegrity({ exitCode: 0, errorCount: 0, errorSample: [], decodedDuration: 65, expectedDuration: 60 }).ok);
+  // no expected duration and only one half of a CRC pair -> those checks are skipped
+  assert.ok(assessIntegrity({ exitCode: 0, errorCount: 0, errorSample: [], decodedDuration: null, crc: '0xabcabc01', expectedCrc: null }).ok);
+  // matching CRC pair stays clean
+  assert.ok(assessIntegrity({ exitCode: 0, errorCount: 0, errorSample: [], decodedDuration: 60, expectedDuration: 60, crc: '0xaaaaaaaa', expectedCrc: '0xaaaaaaaa' }).ok);
 });
