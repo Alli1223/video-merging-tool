@@ -3,7 +3,7 @@
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import ffmpegStatic from 'ffmpeg-static';
 import ffprobeStatic from 'ffprobe-static';
 import { scanDirectory } from './src/scanner';
@@ -39,6 +39,20 @@ function durationOf(f: string): number {
   const out = execFileSync(FFPROBE, ['-v', 'error', '-show_entries', 'format=duration',
     '-of', 'default=nokey=1:noprint_wrappers=1', f]).toString().trim();
   return parseFloat(out) || 0;
+}
+
+function videoRes(f: string): string {
+  return execFileSync(FFPROBE, ['-v', 'error', '-select_streams', 'v:0',
+    '-show_entries', 'stream=width,height', '-of', 'csv=p=0:s=x', f]).toString().trim();
+}
+
+// Full-decode error count, EXCLUDING benign non-monotonic-DTS muxer warnings
+// (timestamp seams at segment joins, not content corruption). spawnSync so a
+// non-zero exit on a damaged file still yields its stderr.
+function contentDecodeErrors(f: string): number {
+  const res = spawnSync(FFMPEG, ['-hide_banner', '-v', 'error', '-noautorotate', '-i', f,
+    '-map', '0:v:0?', '-map', '0:a?', '-f', 'null', '-'], { encoding: 'utf8' });
+  return (res.stderr || '').split(/\r?\n/).filter((l) => l.trim() && !/monoton/i.test(l)).length;
 }
 
 (async () => {
@@ -203,6 +217,38 @@ function durationOf(f: string): number {
   console.log('  output exists       :', fs.existsSync(outNoVerify) ? 'PASS' : 'FAIL');
   console.log('  no verify verdict   :', r6.verified === undefined ? 'PASS' : `FAIL (verified=${r6.verified})`);
   console.log('  length ~4s          :', (nvDur > 3 && nvDur < 5) ? 'PASS' : `FAIL (${nvDur.toFixed(2)}s)`);
+
+  // --- Downscale to a smaller target + heterogeneous-encoder join (regression) ---
+  // A clip LARGER than the chosen output resolution must be downscaled, and the
+  // merged file must decode cleanly. The matching-resolution clip is stream-
+  // copied while the larger one is re-encoded; the segments (different parameter
+  // sets) are joined as MPEG-TS so they don't corrupt each other. This mirrors
+  // the reported "every converted video is corrupted" case — which an MP4-segment
+  // join silently broke, very visibly under NVENC.
+  console.log('\n--- Downscale to a smaller target (720p clip copied + 1080p clip downscaled) ---');
+  const dsDir = path.join(dir, 'downscale-test');
+  fs.mkdirSync(dsDir);
+  gen(dsDir, 'M_720.mp4', ['-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30:duration=2',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2', '-c:v', 'libx265', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-tag:v', 'hvc1', '-shortest', '-metadata', 'creation_time=2021-02-01T09:00:00.000000Z']);
+  gen(dsDir, 'N_1080.mp4', ['-f', 'lavfi', '-i', 'testsrc=size=1920x1080:rate=30:duration=2',
+    '-f', 'lavfi', '-i', 'sine=frequency=660:duration=2', '-c:v', 'libx265', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-tag:v', 'hvc1', '-shortest', '-metadata', 'creation_time=2021-02-01T10:00:00.000000Z']);
+  const { clips: dsClips } = await scanDirectory(dsDir);
+  const outDs = path.join(dsDir, 'merged_720.mp4');
+  const r7 = await ffmpeg.merge({ outputPath: outDs, clips: dsClips,
+    settings: { resolution: '720', codec: 'hevc', quality: 'near' } }, onProg());
+  console.log('\n  result:', JSON.stringify(r7));
+  probe(outDs);
+  const dsRes = videoRes(outDs);
+  const dsErrs = contentDecodeErrors(outDs);
+  const dsDur = durationOf(outDs);
+  console.log('  output exists       :', fs.existsSync(outDs) ? 'PASS' : 'FAIL');
+  console.log('  downscaled to 720p  :', dsRes === '1280x720' ? 'PASS' : `FAIL (${dsRes})`);
+  console.log('  decodes clean       :', dsErrs === 0 ? 'PASS' : `FAIL (${dsErrs} content error(s))`);
+  console.log('  mixed copy+reencode :', r7.mode === 'hybrid' ? 'PASS' : `FAIL (${r7.mode})`);
+  console.log('  verified            :', r7.verified ? 'PASS' : 'FAIL');
+  console.log('  full length ~4s     :', (dsDur > 3 && dsDur < 5) ? 'PASS' : `FAIL (${dsDur.toFixed(2)}s)`);
 
   fs.rmSync(dir, { recursive: true, force: true });
   console.log('\nAll engine tests completed. Cleaned up temp dir.');

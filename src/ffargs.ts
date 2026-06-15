@@ -120,9 +120,20 @@ export function buildVideoEncodeArgs(codec: Codec, useNvenc: boolean, quality: Q
 
 // Args to turn ONE clip into a target-spec segment file. When copyVideo is true
 // (the clip already matches the target) the video is stream-copied (lossless)
-// and only the audio is normalized; otherwise the video is scaled/padded/fps-
-// converted and re-encoded. Audio is always normalized to AAC 48k stereo so all
-// segments can be concatenated by stream copy afterwards.
+// and only the audio is normalized; otherwise the video is scaled (downscaling
+// anything larger than the target) / padded / fps-converted and re-encoded.
+// Audio is always normalized to AAC 48k stereo so all segments concatenate.
+//
+// Segments are written as MPEG-TS, NOT MP4. MPEG-TS repeats the codec parameter
+// sets (H.264 SPS/PPS, HEVC VPS/SPS/PPS) in-band ahead of every keyframe, so a
+// later stream-copy concat of segments made by *different* encoders — a copied
+// original next to an NVENC/x264/x265 re-encode — has each segment decode against
+// its own parameters. An MP4 segment stores ONE parameter set out-of-band
+// (avcC/hvcC); concatenating heterogeneous MP4 segments by stream copy keeps
+// only the first segment's parameters, so every re-encoded clip then decodes
+// against the wrong SPS/PPS and is silently corrupted (very visible with NVENC,
+// which emits different parameter sets than the source encoder). The mpegts
+// muxer applies the mp4->Annex-B bitstream conversion automatically for copy.
 export function buildSegmentArgs(
   clip: { path: string; hasAudio: boolean; duration: number },
   target: Target,
@@ -147,7 +158,7 @@ export function buildSegmentArgs(
     args.push(...buildVideoEncodeArgs(encOpts.codec, encOpts.useNvenc, encOpts.quality));
   }
   args.push('-c:a', 'aac', '-ar', '48000', '-ac', '2', '-b:a', '320k');
-  args.push('-movflags', '+faststart', outPath);
+  args.push('-f', 'mpegts', outPath);
   return args;
 }
 

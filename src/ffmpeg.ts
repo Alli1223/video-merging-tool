@@ -335,6 +335,14 @@ function runVerifyFfmpeg(args: string[], totalDuration: number, onProgress: Prog
     const noteErrorLine = (line: string): void => {
       const t = line.trim();
       if (!t) return;
+      // Concatenating independently-encoded segments leaves a tiny timestamp
+      // seam at each join, so decoding the result makes the null muxer warn
+      // "non monotonically increasing dts to muxer". Every frame is present and
+      // a stream-copy remux of the same file is clean, so this is a timestamp
+      // artifact, not content corruption — don't let it fail verification (and
+      // trigger a needless full re-encode). Genuine decode errors carry their
+      // own distinct messages and are still counted.
+      if (/monoton/i.test(t)) return;
       errorCount++;
       if (errorSample.length < 5) errorSample.push(t.slice(0, 300));
     };
@@ -541,7 +549,9 @@ async function mergeHybrid(clips: MergeClip[], outputPath: string, target: Targe
       if (canceled) { throw canceledError(); }
       const clip = clips[i];
       const clipName = clip.name || path.basename(String(clip.path || ''));
-      const seg = path.join(tmpDir, `seg-${String(i).padStart(4, '0')}.mp4`);
+      // MPEG-TS segments so copied + re-encoded clips (different parameter sets)
+      // can be stream-copy-joined without corruption — see buildSegmentArgs.
+      const seg = path.join(tmpDir, `seg-${String(i).padStart(4, '0')}.ts`);
       let copyNow = !forceReencode && matchesTargetVideo(clip, target, codecName);
       const base = done;
       const onSeg: ProgressCb = (p) => {

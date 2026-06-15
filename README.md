@@ -154,6 +154,17 @@ almost always match. When they don't, the **⚠ Mixed formats** badge appears an
 the app switches to the re-encode path, which re-renders the video and is
 therefore not bit-for-bit lossless (though CRF 18 is visually near-lossless).
 
+In a mixed merge, clips that already match the target are still stream-copied
+losslessly and only the others are re-encoded (e.g. a 4K clip is downscaled to a
+1080p target). Those per-clip segments are joined through **MPEG-TS**, which
+repeats the codec parameter sets in-band, so a copied original and a re-encoded
+clip — which carry *different* parameters, especially when the re-encode uses a
+GPU (NVENC) encoder — decode correctly side by side. (Joining them as MP4 instead
+keeps only the first clip's parameters and silently corrupts every re-encoded
+clip.) A consequence: a mixed **HEVC** output is tagged `hev1` rather than `hvc1`,
+which plays everywhere except some older Apple/QuickTime players; pure-lossless
+merges keep their original tag.
+
 ## Integrity verification & automatic repair
 
 Stream copy (`-c copy`) never decodes the footage, so a source file with a

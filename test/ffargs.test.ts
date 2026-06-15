@@ -136,15 +136,20 @@ test('buildSegmentArgs copies matching video and re-encodes the rest', () => {
   const target = { W: 3840, H: 2160, F: 60 };
   const enc = { codec: 'hevc' as const, useNvenc: true, quality: 'near' as const };
 
-  const copy = buildSegmentArgs(clip, target, enc, '/seg.mp4', true).join(' ');
+  const copy = buildSegmentArgs(clip, target, enc, '/seg.ts', true).join(' ');
   assert.ok(copy.includes('-c:v copy'));         // matching clip kept losslessly
   assert.ok(!copy.includes('hevc_nvenc'));
   assert.ok(copy.includes('-c:a aac'));          // audio normalized for the join
+  // Segments are MPEG-TS (params in-band per segment) so a copied original and
+  // a re-encoded clip can be stream-copy-joined without corruption — NOT MP4.
+  assert.ok(copy.includes('-f mpegts'));
+  assert.ok(!copy.includes('faststart'));        // faststart is an mp4-only flag
 
-  const re = buildSegmentArgs(clip, target, enc, '/seg.mp4', false).join(' ');
+  const re = buildSegmentArgs(clip, target, enc, '/seg.ts', false).join(' ');
   assert.ok(re.includes('hevc_nvenc'));
   assert.ok(re.includes('scale=3840:2160'));
   assert.ok(!re.includes('-c:v copy'));
+  assert.ok(re.includes('-f mpegts'));
 });
 
 test('buildSegmentArgs adds a silent track for clips without audio', () => {
