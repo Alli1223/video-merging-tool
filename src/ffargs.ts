@@ -354,6 +354,14 @@ export function buildVideoCrcArgs(file: string, crcOutPath: string): string[] {
   return ['-v', 'error', '-noautorotate', '-i', file, '-map', '0:v:0', '-f', 'crc', crcOutPath];
 }
 
+// Decode just a short window starting at `offset` seconds (fast input seek) into
+// the null muxer — used to spot-check a few points across a huge output instead
+// of decoding the whole thing. Decode errors in the window surface on stderr.
+export function buildSpotCheckArgs(file: string, offset: number, window: number): string[] {
+  return ['-v', 'error', '-noautorotate', '-ss', String(Math.max(0, offset)), '-i', file,
+    '-t', String(Math.max(0.1, window)), '-map', '0:v:0?', '-map', '0:a?', '-f', 'null', '-'];
+}
+
 // Parse the crc muxer's output ("CRC=0x12345678") to a normalized string.
 export function parseCrcOutput(content: string | null | undefined): string | null {
   const m = String(content || '').match(/CRC=(0x[0-9A-Fa-f]{8})/);
@@ -388,6 +396,27 @@ export function assessIntegrity(input: IntegrityInput): VerifyReport {
     issues.push({ kind: 'crc', detail: `video content CRC ${input.crc} does not match the source's ${input.expectedCrc}` });
   }
   return { ok: issues.length === 0, issues };
+}
+
+// Whether the post-merge integrity check should run. On unless explicitly off,
+// so older settings.json files (no `verify` key) keep verifying.
+export function verifyEnabled(settings: Partial<Settings> = {}): boolean {
+  return settings.verify !== false;
+}
+
+// Evenly-spaced seek offsets (seconds) for spot-checking a long output: from 0
+// to (duration - window) inclusive. The count is ~one per minute, clamped to
+// [minSamples, maxSamples], so a multi-hour file is sampled at a fixed handful
+// of points (fast) while a shorter one still gets reasonable coverage.
+export function spotCheckOffsets(duration: number, window: number, minSamples: number, maxSamples: number): number[] {
+  const w = Math.max(0, window);
+  if (!(duration > w) || maxSamples < 1) return [0];
+  const usable = duration - w;
+  const n = Math.max(Math.max(1, minSamples), Math.min(maxSamples, Math.ceil(duration / 60)));
+  if (n === 1) return [0];
+  const offsets: number[] = [];
+  for (let i = 0; i < n; i++) offsets.push(Math.round((usable * i / (n - 1)) * 100) / 100);
+  return offsets;
 }
 
 // ---------------------------------------------------------------------------

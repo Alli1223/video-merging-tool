@@ -8,8 +8,8 @@ import {
   parseFps, concatListContent, buildCopyArgs, buildReencodeArgs,
   resolveTarget, buildSegmentArgs, parseProgressTime, computePercent,
   planMusic, buildLoopUnitArgs, buildMusicMuxArgs,
-  buildVerifyArgs, buildVideoCrcArgs, parseCrcOutput, assessIntegrity, durationTolerance,
-  splitLimitBytes, partPath, planParts
+  buildVerifyArgs, buildVideoCrcArgs, buildSpotCheckArgs, parseCrcOutput, assessIntegrity, durationTolerance,
+  verifyEnabled, spotCheckOffsets, splitLimitBytes, partPath, planParts
 } from './ffargs';
 import * as log from './logger';
 
@@ -436,6 +436,59 @@ export async function verifyFile(file: string, opts: VerifyFileOpts = {}): Promi
   return report;
 }
 
+// Output at or below this size is verified by a full end-to-end decode (cheap
+// at that size). A larger file — e.g. a 256 GB upload-split part — is instead
+// spot-checked: the container is probed and a handful of short windows are
+// decoded across the timeline, so verification stays fast on huge merges (at
+// the cost of possibly missing damage that falls between the sampled points).
+const FULL_DECODE_MAX_BYTES = 2 * 1e9; // 2 GB
+const SPOT_WINDOW_SECONDS = 2;         // decode this much at each sample point
+const SPOT_MIN_SAMPLES = 8;
+const SPOT_MAX_SAMPLES = 24;
+
+// Spot-check a large output without decoding all of it: confirm the container
+// is readable with a video stream of roughly the expected length, then decode a
+// few short windows sampled across the timeline and collect any decode errors.
+export async function verifyFileSpot(file: string, expectedDuration: number, onProgress: ProgressCb): Promise<VerifyReport> {
+  assertBinaries();
+  let probe: ProbeResult;
+  try { probe = await probeFile(file); }
+  catch (e) { return { ok: false, issues: [{ kind: 'process', detail: 'could not read the output container: ' + errMsg(e) }] }; }
+  if (!probe.hasVideo) return { ok: false, issues: [{ kind: 'process', detail: 'no decodable video stream in the output' }] };
+
+  const offsets = spotCheckOffsets(probe.duration || expectedDuration || 0, SPOT_WINDOW_SECONDS, SPOT_MIN_SAMPLES, SPOT_MAX_SAMPLES);
+  let errorCount = 0;
+  let worstExit = 0;
+  const errorSample: string[] = [];
+  for (let i = 0; i < offsets.length; i++) {
+    if (canceled) throw canceledError();
+    const r = await runVerifyFfmpeg(buildSpotCheckArgs(file, offsets[i], SPOT_WINDOW_SECONDS), 0, () => {});
+    errorCount += r.errorCount;
+    if (r.exitCode && r.exitCode !== 0) worstExit = r.exitCode;
+    for (const s of r.errorSample) if (errorSample.length < 5) errorSample.push(s);
+    onProgress({ percent: ((i + 1) / offsets.length) * 100 });
+  }
+  // Feed the aggregate through the same verdict logic as a full decode. The
+  // container's duration stands in for "decodable length" (a truncated tail
+  // still surfaces as decode errors in the last sampled window).
+  return assessIntegrity({
+    exitCode: worstExit, errorCount, errorSample,
+    decodedDuration: probe.duration || null, expectedDuration: expectedDuration || null,
+    crc: null, expectedCrc: null
+  });
+}
+
+// Pick the verification strategy by output size: a full decode when that is
+// affordable, a spot-check when the file is large.
+async function verifyOutput(file: string, expectedDuration: number, onProgress: ProgressCb): Promise<VerifyReport> {
+  const size = statBytes(file);
+  if (size > 0 && size <= FULL_DECODE_MAX_BYTES) {
+    return verifyFile(file, { expectedDuration, onProgress });
+  }
+  log.info(`Output is ${fmtGB(size)} (over ${fmtGB(FULL_DECODE_MAX_BYTES)}); spot-checking instead of a full decode.`);
+  return verifyFileSpot(file, expectedDuration, onProgress);
+}
+
 async function mergeCopy(clips: { path: string }[], outputPath: string, totalDuration: number, onProgress: ProgressCb): Promise<MergeResult> {
   const listFile = path.join(os.tmpdir(), `vmt-concat-${process.pid}-${Date.now()}.txt`);
   fs.writeFileSync(listFile, concatListContent(clips), 'utf8');
@@ -465,7 +518,7 @@ async function mergeReencode(clips: MergeClip[], outputPath: string, target: Tar
 // (lossless); the rest are re-encoded to the target. Each clip becomes a
 // normalized segment, then all segments are joined by stream copy. Falls back
 // to a full re-encode if the stream-copy join fails.
-async function mergeHybrid(clips: MergeClip[], outputPath: string, target: Target, encOpts: EncodeOpts, codecName: Codec, totalDuration: number, onProgress: ProgressCb, forceReencode?: boolean): Promise<MergeResult> {
+async function mergeHybrid(clips: MergeClip[], outputPath: string, target: Target, encOpts: EncodeOpts, codecName: Codec, totalDuration: number, onProgress: ProgressCb, forceReencode?: boolean, verifySegments: boolean = false): Promise<MergeResult> {
   // Keep the working segments on the SAME drive as the output: this avoids
   // filling the system drive (C:) with potentially many GB of intermediates,
   // and makes the final stream-copy join a fast same-volume operation. Fall
@@ -503,15 +556,6 @@ async function mergeHybrid(clips: MergeClip[], outputPath: string, target: Targe
           fps: p.fps, speed: p.speed
         });
       };
-      const onVerify: ProgressCb = (p) => {
-        // The check decodes the just-written segment, so it advances within
-        // the same slice of the bar the clip already occupies.
-        onProgress({
-          percent: computePercent(base + (p.seconds || 0), totalDuration) * 0.92,
-          phase: 'verifying', clip: i + 1, total: clips.length, clipName
-        });
-      };
-
       const buildSegment = async (): Promise<void> => {
         try {
           await runFfmpeg(buildSegmentArgs(clip, target, { ...encOpts, useNvenc: useNvencNow }, seg, copyNow), clip.duration || 0, onSeg);
@@ -538,33 +582,43 @@ async function mergeHybrid(clips: MergeClip[], outputPath: string, target: Targe
       };
       await buildSegment();
 
-      // Integrity-check the segment we just produced. A stream-copied segment
-      // is additionally CRC-compared against its source, so damage in the
-      // source (or a bad write) can't ride a lossless copy into the output.
-      let report = await verifyFile(seg, {
-        expectedDuration: clip.duration || 0,
-        crcCompareSource: copyNow ? clip.path : null,
-        onProgress: onVerify
-      });
-      if (!report.ok) {
-        const reason: VerifyIssueKind = report.issues[0] ? report.issues[0].kind : 'decode';
-        log.warn(`Clip ${i + 1}/${clips.length} (${clipName}) failed its integrity check — ${summarizeIssues(report)} — rebuilding it with a re-encode.`);
-        // Re-encoding decodes around damaged regions (error concealment)
-        // instead of copying them; a corrupt GPU encode is redone on the CPU.
-        const wasCopy = copyNow;
-        copyNow = false;
-        if (!wasCopy) useNvencNow = false;
-        safeUnlink(seg);
-        await buildSegment();
-        report = await verifyFile(seg, { expectedDuration: clip.duration || 0, onProgress: onVerify });
-        if (report.ok) {
-          if (!repaired.some((r) => r.name === clipName)) repaired.push({ name: clipName, reason });
-          log.info(`Clip ${i + 1} (${clipName}) repaired by re-encoding (original problem: ${reason}).`);
-        } else {
-          // Still failing after a rebuild (e.g. the source is too damaged to
-          // decode at full length). Keep the best effort and tell the user.
-          unresolved.push(`${clipName} (${summarizeIssues(report)})`);
-          log.error(`Clip ${i + 1} (${clipName}) still fails verification after re-encoding: ${summarizeIssues(report)}`);
+      // Localized integrity check — repair mode only. Decode the just-written
+      // segment (and, for a stream copy, CRC-compare it against its source) so
+      // a damaged clip is pinpointed and re-encoded rather than copied through.
+      // The normal merge skips this for speed — decoding every clip as it went
+      // tripled the time on a large copy merge — and the finished output is
+      // checked once at the end instead; this heavy per-clip pass runs only
+      // when that end check has already found a problem.
+      if (verifySegments) {
+        const onVerify: ProgressCb = (p) => onProgress({
+          percent: computePercent(base + (p.seconds || 0), totalDuration) * 0.92,
+          phase: 'verifying', clip: i + 1, total: clips.length, clipName
+        });
+        let report = await verifyFile(seg, {
+          expectedDuration: clip.duration || 0,
+          crcCompareSource: copyNow ? clip.path : null,
+          onProgress: onVerify
+        });
+        if (!report.ok) {
+          const reason: VerifyIssueKind = report.issues[0] ? report.issues[0].kind : 'decode';
+          log.warn(`Clip ${i + 1}/${clips.length} (${clipName}) failed its integrity check — ${summarizeIssues(report)} — rebuilding it with a re-encode.`);
+          // Re-encoding decodes around damaged regions (error concealment)
+          // instead of copying them; a corrupt GPU encode is redone on the CPU.
+          const wasCopy = copyNow;
+          copyNow = false;
+          if (!wasCopy) useNvencNow = false;
+          safeUnlink(seg);
+          await buildSegment();
+          report = await verifyFile(seg, { expectedDuration: clip.duration || 0, onProgress: onVerify });
+          if (report.ok) {
+            if (!repaired.some((r) => r.name === clipName)) repaired.push({ name: clipName, reason });
+            log.info(`Clip ${i + 1} (${clipName}) repaired by re-encoding (original problem: ${reason}).`);
+          } else {
+            // Still failing after a rebuild (e.g. the source is too damaged to
+            // decode at full length). Keep the best effort and tell the user.
+            unresolved.push(`${clipName} (${summarizeIssues(report)})`);
+            log.error(`Clip ${i + 1} (${clipName}) still fails verification after re-encoding: ${summarizeIssues(report)}`);
+          }
         }
       }
 
@@ -704,10 +758,11 @@ async function mergeSingle(opts: MergeOptions, onProgress: ProgressCb): Promise<
     const allMatch = clips.every((c) => matchesTargetVideo(c, target, codec));
     const allCompat = new Set(clips.map((c) => c.compatKey)).size === 1;
 
-    // The merge work fills 0..86% of the (video-side) progress and the final
-    // verification pass 86..100%. With music enabled both sit inside the
-    // 0..90% video share set up above.
-    const workProgress: ProgressCb = (p) => videoProgress({ ...p, percent: (p.percent || 0) * 0.86 });
+    // The merge work fills 0..86% of the (video-side) progress and the
+    // post-merge verification 86..100%; with verification off the merge fills
+    // the whole bar. With music enabled both sit inside the 0..90% video share.
+    const wantVerify = verifyEnabled(settings);
+    const workProgress: ProgressCb = (p) => videoProgress({ ...p, percent: (p.percent || 0) * (wantVerify ? 0.86 : 1) });
     const verifyProgress: ProgressCb = (p) =>
       videoProgress({ percent: 86 + (p.percent || 0) * 0.14, phase: 'verifying', seconds: p.seconds, totalDuration });
 
@@ -718,37 +773,46 @@ async function mergeSingle(opts: MergeOptions, onProgress: ProgressCb): Promise<
       result = await mergeHybrid(clips, videoTarget, target, encOpts, codec, totalDuration, workProgress, forceReencode);
     }
 
-    // Final integrity pass: decode the whole merged file end to end so any
-    // corruption (a damaged source copied through, a truncated write, a bad
-    // join) is caught now rather than discovered during playback.
-    log.info('Verifying merged output:', videoTarget);
-    let report = await verifyFile(videoTarget, { expectedDuration: totalDuration, onProgress: verifyProgress });
-    if (!report.ok) {
-      log.warn(`Merged output failed verification (${summarizeIssues(report)}); repairing.`);
-      const prev = result;
-      safeUnlink(videoTarget);
-      if (prev.mode === 'copy') {
-        // Redo the merge per clip: each clip is individually verified and only
-        // the damaged ones get re-encoded, so the repair touches just what is
-        // actually broken.
-        result = await mergeHybrid(clips, videoTarget, target, encOpts, codec, totalDuration, workProgress, forceReencode);
-      } else {
-        // The per-clip path already verified its segments, so the remaining
-        // suspect is the join — rebuild with the single-pass re-encoder.
-        result = await mergeReencode(clips, videoTarget, target, encOpts, totalDuration, workProgress);
-        if (prev.repaired) result.repaired = prev.repaired;
-        if (prev.verifyNote) result.verifyNote = prev.verifyNote;
+    // Post-merge integrity check (optional; on by default). The merge itself no
+    // longer decodes every clip as it goes, so corruption — a damaged source
+    // copied through, a truncated write, a bad join — is caught here instead, in
+    // one pass over the finished file. Small outputs are decoded in full; a
+    // large one (e.g. a 256 GB upload-split part) is spot-checked so the pass
+    // stays fast. Turn the setting off to skip the check entirely.
+    if (wantVerify) {
+      log.info('Verifying merged output:', videoTarget);
+      let report = await verifyOutput(videoTarget, totalDuration, verifyProgress);
+      if (!report.ok) {
+        log.warn(`Merged output failed verification (${summarizeIssues(report)}); repairing.`);
+        safeUnlink(videoTarget);
+        // Rebuild per clip WITH per-segment verification: this decodes each clip
+        // and CRC-compares stream copies against their source, pinpointing and
+        // re-encoding just the damaged one(s). The expensive localization runs
+        // only now, once a problem has actually been found.
+        result = await mergeHybrid(clips, videoTarget, target, encOpts, codec, totalDuration, workProgress, forceReencode, true);
+        report = await verifyOutput(videoTarget, totalDuration, verifyProgress);
+        if (!report.ok) {
+          // Still failing after a localized rebuild — the join/encode is the
+          // remaining suspect, so redo it as a single-pass full re-encode.
+          log.warn(`Still failing after localized repair (${summarizeIssues(report)}); re-encoding in a single pass.`);
+          const partial = result;
+          result = await mergeReencode(clips, videoTarget, target, encOpts, totalDuration, workProgress);
+          if (partial.repaired) result.repaired = partial.repaired;
+          if (partial.verifyNote) result.verifyNote = partial.verifyNote;
+          report = await verifyOutput(videoTarget, totalDuration, verifyProgress);
+        }
       }
-      report = await verifyFile(videoTarget, { expectedDuration: totalDuration, onProgress: verifyProgress });
-    }
-    result.verified = report.ok;
-    if (!report.ok) {
-      result.verifyNote = [result.verifyNote, summarizeIssues(report)].filter(Boolean).join('; ');
-      log.error('Merged output still fails verification after repair; keeping the best effort.', result.verifyNote);
-    } else if (result.repaired && result.repaired.length) {
-      log.info('Merged output verified OK. Repaired clips:', result.repaired.map((r) => `${r.name} (${r.reason})`).join(', '));
+      result.verified = report.ok;
+      if (!report.ok) {
+        result.verifyNote = [result.verifyNote, summarizeIssues(report)].filter(Boolean).join('; ');
+        log.error('Merged output still fails verification after repair; keeping the best effort.', result.verifyNote);
+      } else if (result.repaired && result.repaired.length) {
+        log.info('Merged output verified OK. Repaired clips:', result.repaired.map((r) => `${r.name} (${r.reason})`).join(', '));
+      } else {
+        log.info('Merged output verified OK.');
+      }
     } else {
-      log.info('Merged output verified OK.');
+      log.info('Output verification is turned off in settings — skipping the integrity check.');
     }
 
     if (music) {
@@ -910,9 +974,10 @@ async function mergeSplit(opts: MergeOptions, limitBytes: number, onProgress: Pr
   const result: MergeResult = {
     success: true,
     mode: lastMode,
-    outputPath: parts[0].path,
-    verified: allVerified
+    outputPath: parts[0].path
   };
+  // Only claim a verification verdict when the check actually ran for the parts.
+  if (verifyEnabled(settings)) result.verified = allVerified;
   if (parts.length > 1) result.parts = parts;
   if (repaired.length) result.repaired = repaired;
   if (notes.length) result.verifyNote = notes.join('; ');

@@ -6,7 +6,8 @@ import {
   resolveTarget, buildVideoEncodeArgs, buildSegmentArgs,
   planMusic, buildLoopUnitArgs, buildMusicMuxArgs,
   estimatedVideoBitrate, estimateMergeBytes,
-  buildVerifyArgs, buildVideoCrcArgs, parseCrcOutput, durationTolerance, assessIntegrity,
+  buildVerifyArgs, buildVideoCrcArgs, buildSpotCheckArgs, parseCrcOutput, durationTolerance, assessIntegrity,
+  verifyEnabled, spotCheckOffsets,
   splitLimitBytes, partPath, planParts
 } from '../src/ffargs';
 
@@ -461,4 +462,40 @@ test('planParts with no limit returns one part covering everything', () => {
   assert.equal(parts.length, 1);
   assert.deepEqual([parts[0].start, parts[0].end], [0, 1]);
   assert.equal(planParts([], {}, {}, 100e9).length, 0);
+});
+
+test('verifyEnabled is on unless explicitly disabled', () => {
+  assert.equal(verifyEnabled({}), true);             // default on (e.g. old settings.json)
+  assert.equal(verifyEnabled({ verify: true }), true);
+  assert.equal(verifyEnabled({ verify: false }), false);
+});
+
+test('spotCheckOffsets samples across the timeline, clamped to [min,max]', () => {
+  // short file: bumped up to the minimum sample count, spanning [0, dur-window]
+  const a = spotCheckOffsets(120, 2, 8, 24);
+  assert.equal(a.length, 8);
+  assert.equal(a[0], 0);
+  assert.equal(a[a.length - 1], 118); // duration - window
+  // long file: ~one per minute, capped at the maximum
+  const b = spotCheckOffsets(7200, 2, 8, 24);
+  assert.equal(b.length, 24);
+  assert.equal(b[0], 0);
+  assert.equal(b[b.length - 1], 7198);
+  // offsets are strictly increasing and never seek past the decodable window
+  for (let i = 1; i < b.length; i++) assert.ok(b[i] > b[i - 1]);
+  // tiny / zero / sub-window durations degrade to a single offset at 0
+  assert.deepEqual(spotCheckOffsets(1, 2, 8, 24), [0]);
+  assert.deepEqual(spotCheckOffsets(0, 2, 8, 24), [0]);
+});
+
+test('buildSpotCheckArgs fast-seeks and decodes a short window into null', () => {
+  const s = buildSpotCheckArgs('/out.mp4', 90, 2).join(' ');
+  assert.ok(s.includes('-ss 90'));      // seek BEFORE -i (fast input seek)
+  assert.ok(s.indexOf('-ss') < s.indexOf('-i'));
+  assert.ok(s.includes('-t 2'));        // bounded window length
+  assert.ok(s.includes('-i /out.mp4'));
+  assert.ok(s.includes('-f null'));     // decode, discard output
+  assert.ok(s.includes('-v error'));    // only decode errors on stderr
+  // a negative offset is clamped to 0
+  assert.ok(buildSpotCheckArgs('/o.mp4', -5, 2).join(' ').includes('-ss 0'));
 });

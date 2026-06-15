@@ -120,6 +120,9 @@ interface Settings {
   codec: Codec;
   quality: Quality;
   split: SplitPref;
+  // Run the post-merge integrity check (decode/spot-check the finished file and
+  // auto-repair damaged clips). On by default; turn off to skip it entirely.
+  verify: boolean;
   musicVibe: string;
   musicCrossfade: number;
   musicFadeOut: number;

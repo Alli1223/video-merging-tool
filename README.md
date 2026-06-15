@@ -14,11 +14,12 @@ drag-and-drop timeline, and merges them into a single file.
 - **NVIDIA GPU (NVENC) encoding** — hardware-accelerated **H.264 or HEVC/H.265**,
   auto-detected with an automatic CPU (x264/x265) fallback. Your preferences are
   saved between sessions.
-- **Integrity verification & automatic repair** — after every merge the output
-  is fully decoded to catch corruption (decode errors, truncation), and
-  stream-copied clips are CRC-checked against their sources. A clip that turns
-  out to be damaged is automatically re-encoded (FFmpeg decodes around the
-  damage) so one bad file can't silently ruin the export.
+- **Integrity verification & automatic repair** — optional (on by default): a
+  single pass after the merge checks the output for corruption (decode errors,
+  truncation) and auto-re-encodes any clip that turns out to be damaged, so one
+  bad file can't silently ruin the export. Small files are decoded in full;
+  large ones are spot-checked to stay fast — or turn it off entirely for big
+  merges you trust.
 - **Split for upload limits** — set a max file size (**Settings → Max file
   size**) and the output is split into `name_part1`, `name_part2`, … at clip
   boundaries, each file under the limit. Presets cover YouTube's 256 GB upload
@@ -71,7 +72,8 @@ npm run typecheck   # type-check only (tsc --noEmit), no output emitted
 then uses Node's built-in test runner against the compiled tests in `out/test/`.
 `npm run test:engine` generates a few clips and exercises the lossless,
 re-encode, background-music, and size-split merge paths end to end — including
-a deliberately corrupted clip that must be detected and repaired — handy for
+a deliberately corrupted clip that must be detected and repaired, the spot-check
+verifier used for large outputs, and a verification-disabled run — handy for
 confirming the bundled FFmpeg works after installing on a new OS (e.g. Linux).
 
 ## Build a standalone app
@@ -157,33 +159,42 @@ therefore not bit-for-bit lossless (though CRF 18 is visually near-lossless).
 Stream copy (`-c copy`) never decodes the footage, so a source file with a
 damaged bitstream — a camera that lost power, a flaky SD card, a bad download —
 would previously be copied into the merged file verbatim, and FFmpeg would
-still exit successfully. The merge now ends with a verification pass instead of
-taking that on faith:
+still exit successfully. With **Settings → Verify output** on (the default), the
+merge ends with a single integrity pass over the finished file instead of taking
+that on faith:
 
-1. **Per-clip checks (during the merge).** Every intermediate segment is fully
-   decoded with `-v error`; any decode error or truncated duration flags it.
-   Segments whose video was stream-copied are additionally **CRC-32 compared
-   against their source** (FFmpeg's `crc` muxer over the decoded frames, so the
-   comparison is container-independent) — content has to match the source
-   exactly.
-2. **Whole-file check (after the merge).** The final output is decoded end to
-   end and its decodable length compared with the expected total, so a damaged
-   source copied through, a bad join, or a truncated write is caught before you
-   ever hit play.
-3. **Automatic repair.** A clip that fails its check is rebuilt with a re-encode:
-   decoding conceals the damaged regions instead of copying them, producing a
-   clean, fully playable bitstream. If a lossless merge fails the whole-file
-   check, it is automatically redone per-clip so only the genuinely broken
-   clips lose their lossless status. The result panel reports what was repaired
-   (e.g. *"1 corrupted clip was detected and re-encoded"*) and ends with
-   *"integrity verified ✓"*.
+1. **One pass, after the merge.** The merge itself runs at full speed — clips
+   are no longer decoded one-by-one as they go (that tripled the time on a big
+   lossless merge). Instead the finished file is checked once:
+   - **Small outputs** (≤ 2 GB) are decoded end to end with `-v error`, and the
+     decodable length is compared with the expected total — so a damaged source
+     copied through, a bad join, or a truncated write is caught before playback.
+   - **Large outputs** (a 256 GB upload-split part, say) are **spot-checked** so
+     verification stays fast: the container is probed and a handful of short
+     windows are decoded across the timeline. This is much quicker than decoding
+     hundreds of GB but can miss damage that falls between the sampled points.
+2. **Automatic repair (only when something is wrong).** If the check fails, the
+   merge is rebuilt per-clip *with* full per-segment verification — each clip is
+   decoded and stream copies are **CRC-32 compared against their source** (via
+   FFmpeg's `crc` muxer, container-independent) — to pinpoint and re-encode just
+   the damaged clip(s); decoding conceals the damaged regions instead of copying
+   them. If it still won't verify, the whole thing is redone as a single-pass
+   re-encode. The result panel reports what was repaired (e.g. *"1 corrupted
+   clip was detected and re-encoded"*) and ends with *"integrity verified ✓"*.
 
-Heavily damaged footage may still show visual artifacts where data was
-destroyed — that information is gone — but the exported file itself is
-structurally clean and plays smoothly. In the rare case something still can't
-be verified after repair, the file is kept and the status line tells you
-exactly what couldn't be confirmed (also logged via **Settings → Open log
+Because the heavy per-clip decoding now happens **only when corruption is
+actually detected**, a clean merge pays just one quick pass (or none, if you
+turn verification off). Heavily damaged footage may still show visual artifacts
+where data was destroyed — that information is gone — but the exported file
+itself is structurally clean and plays smoothly. In the rare case something
+still can't be verified after repair, the file is kept and the status line tells
+you exactly what couldn't be confirmed (also logged via **Settings → Open log
 file**).
+
+**Turning it off.** Verification is a checkbox in **Settings → Output &
+encoding**. Even one pass over a 256 GB file is a lot of reading, so for very
+large merges from sources you trust, unchecking **Verify output** skips the
+check entirely and gets you the raw merge speed.
 
 ## Splitting for upload limits (YouTube's 256 GB, FAT32's 4 GB, …)
 
@@ -200,8 +211,9 @@ Some destinations cap the size of a single file — YouTube rejects uploads over
   re-encoded ones. Every finished part is then measured against the limit;
   if real-world bitrate beat the estimate, the part is automatically split in
   half and redone, so the limit holds regardless.
-- **Every part gets the full integrity verification** described above, and the
-  timeline summary shows roughly how many files to expect before you merge.
+- **Every part gets the integrity check** described above (when it's enabled),
+  and the timeline summary shows roughly how many files to expect before you
+  merge.
 - If everything fits under the limit, you just get the single file you asked
   for — no `_part1` suffix.
 

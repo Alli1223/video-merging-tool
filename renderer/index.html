@@ -193,6 +193,13 @@
             </select>
           </div>
           <div class="settings-row">
+            <label class="settings-label" for="setVerify">Verify output</label>
+            <label class="reencode-toggle" title="After merging, check the finished file for corruption (a damaged clip copied through, a truncated write) and automatically re-encode any clip that fails. Large outputs are spot-checked so the check stays fast; turn it off to skip it entirely on big merges you trust.">
+              <input type="checkbox" id="setVerify" />
+              <span>Check for corruption after merging</span>
+            </label>
+          </div>
+          <div class="settings-row">
             <span class="muted setting-note">Clips already at the target are kept lossless; only the others are re-encoded to it. With a max file size set, the output is split into <i>name</i>_part1, _part2… at clip boundaries, each file under the limit.</span>
           </div>
         </section>

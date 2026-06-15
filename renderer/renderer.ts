@@ -73,6 +73,7 @@ interface Elements {
   setCodec: HTMLSelectElement;
   setQuality: HTMLSelectElement;
   setSplit: HTMLSelectElement;
+  setVerify: HTMLInputElement;
   encoderInfo: HTMLElement;
   setMusicCrossfade: HTMLSelectElement;
   setMusicFadeOut: HTMLSelectElement;
@@ -93,7 +94,7 @@ let merging = false;
 let lastOutput: string | null = null;
 let outputPath: string | null = null; // user-chosen save location (null = ask at merge time)
 let lastStatusText = '';
-let settings: Settings = { resolution: 'auto', fps: 'auto', encoder: 'auto', codec: 'hevc', quality: 'near', split: 'off', musicVibe: 'mix', musicCrossfade: 4, musicFadeOut: 5, musicVolume: 100 };
+let settings: Settings = { resolution: 'auto', fps: 'auto', encoder: 'auto', codec: 'hevc', quality: 'near', split: 'off', verify: true, musicVibe: 'mix', musicCrossfade: 4, musicFadeOut: 5, musicVolume: 100 };
 let encoderInfo: EncoderInfo = { h264_nvenc: false, hevc_nvenc: false };
 let mergeStartTime = 0;
 let musicEnabled = false;     // "Add background music" toggle
@@ -1106,6 +1107,7 @@ async function loadSettingsIntoUi(): Promise<void> {
   el.setCodec.value = settings.codec || 'h264';
   el.setQuality.value = settings.quality || 'near';
   el.setSplit.value = settings.split || 'off';
+  el.setVerify.checked = settings.verify !== false;
   el.setMusicCrossfade.value = String(settings.musicCrossfade ?? 4);
   el.setMusicFadeOut.value = String(settings.musicFadeOut ?? 5);
   el.setMusicVolume.value = String(settings.musicVolume ?? 100);
@@ -1124,6 +1126,7 @@ async function onSettingChange(): Promise<void> {
     codec: el.setCodec.value as Codec,
     quality: el.setQuality.value as Quality,
     split: el.setSplit.value as SplitPref,
+    verify: el.setVerify.checked,
     musicCrossfade: parseInt(el.setMusicCrossfade.value, 10),
     musicFadeOut: parseInt(el.setMusicFadeOut.value, 10),
     musicVolume: parseInt(el.setMusicVolume.value, 10)
@@ -1201,6 +1204,7 @@ function init(): void {
   el.setCodec = $<HTMLSelectElement>('setCodec');
   el.setQuality = $<HTMLSelectElement>('setQuality');
   el.setSplit = $<HTMLSelectElement>('setSplit');
+  el.setVerify = $<HTMLInputElement>('setVerify');
   el.encoderInfo = $('encoderInfo');
   el.setMusicCrossfade = $<HTMLSelectElement>('setMusicCrossfade');
   el.setMusicFadeOut = $<HTMLSelectElement>('setMusicFadeOut');
@@ -1234,7 +1238,7 @@ function init(): void {
   el.openLogBtn.addEventListener('click', () => window.api.openLogFile());
   el.openLogFolderBtn.addEventListener('click', () => window.api.revealLogFile());
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !el.settingsOverlay.hidden) closeSettings(); });
-  const settingIds: (keyof Elements)[] = ['setResolution', 'setFps', 'setEncoder', 'setCodec', 'setQuality', 'setSplit',
+  const settingIds: (keyof Elements)[] = ['setResolution', 'setFps', 'setEncoder', 'setCodec', 'setQuality', 'setSplit', 'setVerify',
     'setMusicCrossfade', 'setMusicFadeOut', 'setMusicVolume'];
   settingIds.forEach((id) => {
     el[id].addEventListener('change', onSettingChange);

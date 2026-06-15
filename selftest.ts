@@ -153,6 +153,15 @@ function durationOf(f: string): number {
   console.log('  final verified      :', r4.verified ? 'PASS' : 'FAIL');
   console.log('  full length kept    :', (fixDur > 5 && fixDur < 7) ? 'PASS' : `FAIL (${fixDur.toFixed(2)}s)`);
 
+  // Directly exercise the spot-check verifier (the path real >2 GB outputs take
+  // instead of a full decode — these tiny clips never trip the size threshold,
+  // so call it straight to cover its decode-window + verdict logic).
+  console.log('\n--- Spot-check verifier (used for large outputs) ---');
+  const okSpot = await ffmpeg.verifyFileSpot(path.join(cDir, 'A_clip.mp4'), 2, () => {});
+  const badSpot = await ffmpeg.verifyFileSpot(dPath, 2, () => {});
+  console.log('  clean clip passes   :', okSpot.ok ? 'PASS' : `FAIL (${JSON.stringify(okSpot.issues)})`);
+  console.log('  damaged clip flagged:', !badSpot.ok ? 'PASS' : `FAIL (${JSON.stringify(badSpot.issues)})`);
+
   // --- Size-limited splitting (max file size per output) ---
   // A tiny 100 KB limit forces one clip per part: A (~55 KB) fits the packing
   // budget alone but A+B (~110 KB) doesn't, so the merge must produce
@@ -177,6 +186,23 @@ function durationOf(f: string): number {
   console.log('  parts verified      :', r5.verified ? 'PASS' : 'FAIL');
   console.log('  combined length ~4s :', (splitDur > 3 && splitDur < 5) ? 'PASS' : `FAIL (${splitDur.toFixed(2)}s)`);
   console.log('  no single file left :', !fs.existsSync(outSplit) ? 'PASS' : 'FAIL');
+
+  // --- Verification disabled (opt-out) ---
+  // With verify off, the merge must still produce a correct file but report no
+  // verification verdict (verified omitted) and run no integrity/repair pass.
+  console.log('\n--- Verify disabled (A+B, settings.verify = false) ---');
+  const outNoVerify = path.join(dir, 'merged_noverify.mp4');
+  const r6 = await ffmpeg.merge({
+    outputPath: outNoVerify,
+    clips: clips.filter((c) => c.name !== 'C_clip.mp4'),
+    settings: { verify: false }
+  }, onProg());
+  console.log('\n  result:', JSON.stringify(r6));
+  probe(outNoVerify);
+  const nvDur = durationOf(outNoVerify);
+  console.log('  output exists       :', fs.existsSync(outNoVerify) ? 'PASS' : 'FAIL');
+  console.log('  no verify verdict   :', r6.verified === undefined ? 'PASS' : `FAIL (verified=${r6.verified})`);
+  console.log('  length ~4s          :', (nvDur > 3 && nvDur < 5) ? 'PASS' : `FAIL (${nvDur.toFixed(2)}s)`);
 
   fs.rmSync(dir, { recursive: true, force: true });
   console.log('\nAll engine tests completed. Cleaned up temp dir.');

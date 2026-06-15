@@ -33,6 +33,7 @@ let lastScanDir: string | null = null;
 const DEFAULT_SETTINGS: Settings = {
   resolution: 'auto', fps: 'auto', encoder: 'auto', codec: 'hevc', quality: 'near',
   split: 'off', // max size per output file ('off' = single file)
+  verify: true, // post-merge integrity check (decode/spot-check + auto-repair)
   // Background music tuning (the selection of tracks is per-session, not saved).
   musicVibe: 'mix', musicCrossfade: 4, musicFadeOut: 5, musicVolume: 100
 };
