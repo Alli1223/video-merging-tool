@@ -29,6 +29,9 @@ drag-and-drop timeline, and merges them into a single file.
   file's created/modified time. Each row shows which source was used.
 - **Drag-to-reorder timeline** — reorder clips in the list *or* the timeline
   strip at the bottom; the two stay in sync.
+- **Per-clip contrast & trim** — select a clip and, in the preview pane, boost
+  its contrast or drag the start/end handles to cut its beginning and end (with
+  a live preview). Only the clips you edit are re-encoded; the rest stay lossless.
 - **Bundled FFmpeg** — `ffmpeg` and `ffprobe` ship via npm
   (`ffmpeg-static` / `ffprobe-static`); nothing else to install.
 - **Shuffle & manual control** — randomize the order with one click (**🔀 Shuffle**),
@@ -126,9 +129,12 @@ metadata that powers in-app auto-update — to a GitHub Release for that tag.
 4. If the badge shows **⚠ Mixed formats**, either leave **Re-encode** on, or click
    **Drop N mismatched** to remove the odd-format clips so the rest merge
    losslessly.
-5. Optionally click **📂 Save to…** to choose the output location up front
+5. Click a clip to preview it. In the preview pane you can **boost its contrast**
+   and **trim its start/end** with the sliders (a ✎ marks edited clips). Edited
+   clips are re-encoded; untouched clips stay lossless.
+6. Optionally click **📂 Save to…** to choose the output location up front
    (otherwise you'll be prompted when you merge).
-6. Click **Merge ▶** and watch the progress bar.
+7. Click **Merge ▶** and watch the progress bar.
 
 ## Automatic updates
 

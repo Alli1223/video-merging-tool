@@ -250,6 +250,35 @@ function contentDecodeErrors(f: string): number {
   console.log('  verified            :', r7.verified ? 'PASS' : 'FAIL');
   console.log('  full length ~4s     :', (dsDur > 3 && dsDur < 5) ? 'PASS' : `FAIL (${dsDur.toFixed(2)}s)`);
 
+  // --- Per-clip contrast + trim (re-encode just the edited clip) ---
+  // P is untouched (stream-copied); Q has its contrast boosted and is trimmed to
+  // its middle 1s, so it is re-encoded. The merged file must be the trimmed total
+  // length (2s + 1s) and decode cleanly.
+  console.log('\n--- Per-clip edits: contrast + trim one of two clips ---');
+  const teDir = path.join(dir, 'edit-test');
+  fs.mkdirSync(teDir);
+  gen(teDir, 'P.mp4', ['-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30:duration=2',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-shortest', '-metadata', 'creation_time=2021-03-01T09:00:00.000000Z']);
+  gen(teDir, 'Q.mp4', ['-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30:duration=2',
+    '-f', 'lavfi', '-i', 'sine=frequency=660:duration=2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-shortest', '-metadata', 'creation_time=2021-03-01T10:00:00.000000Z']);
+  const { clips: teClips } = await scanDirectory(teDir);
+  const q = teClips.find((c) => c.name === 'Q.mp4');
+  if (q) { q.contrast = 1.5; q.trimStart = 0.5; q.trimEnd = 1.5; } // keep its middle second
+  const outTe = path.join(teDir, 'merged_edit.mp4');
+  const r8 = await ffmpeg.merge({ outputPath: outTe, clips: teClips,
+    settings: { codec: 'h264', quality: 'near' } }, onProg());
+  console.log('\n  result:', JSON.stringify(r8));
+  probe(outTe);
+  const teDur = durationOf(outTe);
+  const teErrs = contentDecodeErrors(outTe);
+  console.log('  output exists       :', fs.existsSync(outTe) ? 'PASS' : 'FAIL');
+  console.log('  trimmed total ~3s   :', (teDur > 2.6 && teDur < 3.4) ? 'PASS' : `FAIL (${teDur.toFixed(2)}s)`);
+  console.log('  decodes clean       :', teErrs === 0 ? 'PASS' : `FAIL (${teErrs} content error(s))`);
+  console.log('  re-encoded edited   :', r8.mode === 'hybrid' ? 'PASS' : `FAIL (${r8.mode})`);
+  console.log('  verified            :', r8.verified ? 'PASS' : 'FAIL');
+
   fs.rmSync(dir, { recursive: true, force: true });
   console.log('\nAll engine tests completed. Cleaned up temp dir.');
 })().catch((e) => { console.error('\nTEST FAILED:', e); process.exit(1); });

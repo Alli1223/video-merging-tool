@@ -118,11 +118,32 @@ export function buildVideoEncodeArgs(codec: Codec, useNvenc: boolean, quality: Q
   return args;
 }
 
+// The kept length of a clip after trimming: [trimStart, trimEnd] within the
+// source (defaults: whole clip). Falls back to the full duration when untrimmed.
+export function effectiveDuration(clip: { duration: number; trimStart?: number; trimEnd?: number }): number {
+  const dur = clip.duration > 0 ? clip.duration : 0;
+  const start = clamp(num(clip.trimStart, 0), 0, dur);
+  const end = (clip.trimEnd != null && clip.trimEnd > start) ? Math.min(clip.trimEnd, dur) : dur;
+  return Math.max(0, end - start);
+}
+
+// Does the clip carry any edit (contrast change or trim)? An edited clip can't
+// be stream-copied — its pixels change or it must be cut frame-accurately — so
+// it is always re-encoded, even when its format otherwise matches the target.
+export function clipEdited(clip: { duration?: number; contrast?: number; trimStart?: number; trimEnd?: number }): boolean {
+  const contrastChanged = clip.contrast != null && Math.abs(clip.contrast - 1) > 1e-3;
+  const startTrimmed = num(clip.trimStart, 0) > 0.01;
+  const endTrimmed = clip.trimEnd != null && clip.duration != null && clip.trimEnd < clip.duration - 0.01;
+  return contrastChanged || startTrimmed || endTrimmed;
+}
+
 // Args to turn ONE clip into a target-spec segment file. When copyVideo is true
-// (the clip already matches the target) the video is stream-copied (lossless)
-// and only the audio is normalized; otherwise the video is scaled (downscaling
-// anything larger than the target) / padded / fps-converted and re-encoded.
-// Audio is always normalized to AAC 48k stereo so all segments concatenate.
+// (the clip already matches the target and has no edits) the video is stream-
+// copied (lossless) and only the audio is normalized; otherwise the video is
+// scaled (downscaling anything larger than the target) / padded / fps-converted,
+// contrast-adjusted if requested, and re-encoded. A trim (-ss/-t) keeps only the
+// [trimStart, trimEnd] span — applied to copy and re-encode alike (re-encoding
+// makes the start frame-accurate). Audio is always normalized to AAC 48k stereo.
 //
 // Segments are written as MPEG-TS, NOT MP4. MPEG-TS repeats the codec parameter
 // sets (H.264 SPS/PPS, HEVC VPS/SPS/PPS) in-band ahead of every keyframe, so a
@@ -135,29 +156,46 @@ export function buildVideoEncodeArgs(codec: Codec, useNvenc: boolean, quality: Q
 // which emits different parameter sets than the source encoder). The mpegts
 // muxer applies the mp4->Annex-B bitstream conversion automatically for copy.
 export function buildSegmentArgs(
-  clip: { path: string; hasAudio: boolean; duration: number },
+  clip: { path: string; hasAudio: boolean; duration: number; contrast?: number; trimStart?: number; trimEnd?: number },
   target: Target,
   encOpts: EncodeOpts,
   outPath: string,
   copyVideo: boolean
 ): string[] {
   const { W, H, F } = target;
-  const args = ['-i', clip.path];
+  const start = clamp(num(clip.trimStart, 0), 0, clip.duration > 0 ? clip.duration : num(clip.trimStart, 0));
+  const dur = effectiveDuration(clip);
+  const trimmed = clipEdited({ trimStart: clip.trimStart, trimEnd: clip.trimEnd, duration: clip.duration });
+
+  const args: string[] = [];
+  // Seek BEFORE -i so the cut is fast; on a re-encode ffmpeg then decodes and
+  // discards up to the exact time, making the start frame-accurate.
+  if (start > 0.01) args.push('-ss', fmtNum(start));
+  args.push('-i', clip.path);
   const hasAudio = !!clip.hasAudio;
   if (!hasAudio) {
-    const dur = clip.duration > 0 ? clip.duration : 1;
-    args.push('-f', 'lavfi', '-t', String(dur), '-i', 'anullsrc=r=48000:cl=stereo');
+    const aDur = dur > 0 ? dur : 1;
+    args.push('-f', 'lavfi', '-t', fmtNum(aDur), '-i', 'anullsrc=r=48000:cl=stereo');
   }
   args.push('-map', '0:v:0', '-map', hasAudio ? '0:a:0' : '1:a:0');
   if (copyVideo) {
     args.push('-c:v', 'copy');
   } else {
-    args.push('-vf',
-      `scale=${W}:${H}:force_original_aspect_ratio=decrease,` +
-      `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${F},format=yuv420p`);
+    const vf = [
+      `scale=${W}:${H}:force_original_aspect_ratio=decrease`,
+      `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black`,
+      'setsar=1',
+      `fps=${F}`
+    ];
+    const contrast = num(clip.contrast, 1);
+    if (Math.abs(contrast - 1) > 1e-3) vf.push(`eq=contrast=${fmtNum(clamp(contrast, 0, 3))}`);
+    vf.push('format=yuv420p');
+    args.push('-vf', vf.join(','));
     args.push(...buildVideoEncodeArgs(encOpts.codec, encOpts.useNvenc, encOpts.quality));
   }
   args.push('-c:a', 'aac', '-ar', '48000', '-ac', '2', '-b:a', '320k');
+  // Cap the output to the kept span (only when trimmed at the start or end).
+  if ((trimmed || start > 0.01) && dur > 0) args.push('-t', fmtNum(dur));
   args.push('-f', 'mpegts', outPath);
   return args;
 }
@@ -479,10 +517,13 @@ export function estimateMergeBytes(
   const quality = settings.quality || 'near';
   const forceReencode = !!opts.forceReencode;
 
-  const totalDuration = clips.reduce((s, c) => s + (c.duration || 0), 0);
+  const totalDuration = clips.reduce((s, c) => s + effectiveDuration(c), 0);
   const allMatch = clips.every((c) => clipMatchesTarget(c, target, codec));
   const allCompat = new Set(clips.map((c) => c.compatKey)).size === 1;
-  const pureCopy = !forceReencode && allMatch && allCompat;
+  // An edited clip (contrast/trim) is always re-encoded, so it can't be part of
+  // a pure lossless copy and its size comes from the bitrate model, not its file.
+  const anyEdited = clips.some((c) => clipEdited(c));
+  const pureCopy = !forceReencode && allMatch && allCompat && !anyEdited;
 
   let bytes = 0;
   if (pureCopy) {
@@ -490,8 +531,8 @@ export function estimateMergeBytes(
   } else {
     const brBps = estimatedVideoBitrate(target.W, target.H, target.F, codec, quality);
     for (const c of clips) {
-      if (!forceReencode && clipMatchesTarget(c, target, codec)) bytes += (c.size || 0);
-      else bytes += (brBps / 8) * (c.duration || 0);
+      if (!forceReencode && clipMatchesTarget(c, target, codec) && !clipEdited(c)) bytes += (c.size || 0);
+      else bytes += (brBps / 8) * effectiveDuration(c);
     }
   }
   if (opts.music) bytes += (AUDIO_BITRATE_BPS / 8) * totalDuration;
@@ -534,11 +575,14 @@ function clipWeightBytes(
   clip: EstimateClip, target: Target, codec: Codec, quality: Quality,
   forceReencode: boolean, music: boolean
 ): { bytes: number; exact: boolean } {
-  const copied = !forceReencode && clipMatchesTarget(clip, target, codec) && (clip.size || 0) > 0;
+  const dur = effectiveDuration(clip);
+  // An edited clip (contrast/trim) is re-encoded, so its size comes from the
+  // bitrate model over the kept span, never the original file size.
+  const copied = !forceReencode && clipMatchesTarget(clip, target, codec) && !clipEdited(clip) && (clip.size || 0) > 0;
   const bytes = copied
     ? (clip.size || 0)
-    : (estimatedVideoBitrate(target.W, target.H, target.F, codec, quality) / 8) * (clip.duration || 0) * REENCODE_SAFETY;
-  return { bytes: bytes + (music ? (AUDIO_BITRATE_BPS / 8) * (clip.duration || 0) : 0), exact: copied };
+    : (estimatedVideoBitrate(target.W, target.H, target.F, codec, quality) / 8) * dur * REENCODE_SAFETY;
+  return { bytes: bytes + (music ? (AUDIO_BITRATE_BPS / 8) * dur : 0), exact: copied };
 }
 
 // Greedily pack consecutive clips into parts of at most limitBytes (with the

@@ -69,6 +69,29 @@
         <div class="preview-header">Preview</div>
         <video id="previewVideo" controls preload="metadata"></video>
         <div id="previewInfo" class="preview-info"></div>
+
+        <div id="clipEdits" class="clip-edits" hidden>
+          <div class="edits-header">
+            <span>Adjustments</span>
+            <button id="resetEditsBtn" class="btn btn-small" title="Reset contrast and trim for this clip">Reset</button>
+          </div>
+          <div class="edit-row">
+            <label for="contrastSlider">Contrast <span id="contrastVal" class="edit-val">1.00</span></label>
+            <input type="range" id="contrastSlider" min="0.5" max="2" step="0.05" value="1"
+              title="Increase or decrease this clip's contrast (1.00 = unchanged). Adjusted clips are re-encoded." />
+          </div>
+          <div class="edit-row">
+            <label for="trimStartSlider">Trim start <span id="trimStartVal" class="edit-val">0:00</span></label>
+            <input type="range" id="trimStartSlider" min="0" max="100" step="0.1" value="0"
+              title="Drag to skip the beginning of this clip. The preview jumps to the new start." />
+          </div>
+          <div class="edit-row">
+            <label for="trimEndSlider">Trim end <span id="trimEndVal" class="edit-val">0:00</span></label>
+            <input type="range" id="trimEndSlider" min="0" max="100" step="0.1" value="100"
+              title="Drag to cut the end of this clip. The preview jumps to the new end." />
+          </div>
+          <div class="edit-summary" id="editSummary"></div>
+        </div>
       </aside>
     </div>
 

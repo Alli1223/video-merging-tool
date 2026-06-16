@@ -32,6 +32,15 @@ interface Elements {
   previewPane: HTMLElement;
   previewVideo: HTMLVideoElement;
   previewInfo: HTMLElement;
+  clipEdits: HTMLElement;
+  resetEditsBtn: HTMLButtonElement;
+  contrastSlider: HTMLInputElement;
+  contrastVal: HTMLElement;
+  trimStartSlider: HTMLInputElement;
+  trimStartVal: HTMLElement;
+  trimEndSlider: HTMLInputElement;
+  trimEndVal: HTMLElement;
+  editSummary: HTMLElement;
   timeline: HTMLElement;
   totalDuration: HTMLElement;
   compatBadge: HTMLElement;
@@ -141,6 +150,31 @@ function baseName(p: string): string {
   return p.split(/[\\/]/).pop() || p;
 }
 
+// Kept length of a clip after trimming (mirrors effectiveDuration in ffargs.ts).
+function effDur(c: Clip): number {
+  const dur = c.duration > 0 ? c.duration : 0;
+  const start = Math.max(0, Math.min(c.trimStart || 0, dur));
+  const end = (c.trimEnd != null && c.trimEnd > start) ? Math.min(c.trimEnd, dur) : dur;
+  return Math.max(0, end - start);
+}
+
+// Has the user changed this clip's contrast or trimmed it? (mirrors clipEdited)
+function isEdited(c: Clip): boolean {
+  return (c.contrast != null && Math.abs(c.contrast - 1) > 1e-3)
+    || (c.trimStart || 0) > 0.01
+    || (c.trimEnd != null && c.trimEnd < c.duration - 0.01);
+}
+
+// Short human description of a clip's edits, for tooltips.
+function editLabel(c: Clip): string {
+  const bits: string[] = [];
+  if (c.contrast != null && Math.abs(c.contrast - 1) > 1e-3) bits.push(`contrast ${c.contrast.toFixed(2)}`);
+  const start = c.trimStart || 0;
+  const end = c.trimEnd != null ? c.trimEnd : c.duration;
+  if (start > 0.01 || end < c.duration - 0.01) bits.push(`trim ${fmtDuration(start)}→${fmtDuration(end)}`);
+  return bits.join(', ');
+}
+
 const SOURCE_LABEL: Record<TimeSource, string> = {
   metadata: 'metadata',
   filename: 'filename',
@@ -196,7 +230,8 @@ function outputPlan(): { t: Target; codec: Codec; matching: number; pureCopy: bo
 // (async) estimate is only refetched when one of these actually changes.
 function estimateSignature(): string {
   const clipSig = clips.map((c) =>
-    `${c.id}:${c.size}:${c.width}x${c.height}:${Math.round(c.fps || 0)}:${c.vcodec}:${c.compatKey}:${Math.round(c.duration || 0)}`
+    `${c.id}:${c.size}:${c.width}x${c.height}:${Math.round(c.fps || 0)}:${c.vcodec}:${c.compatKey}:${Math.round(c.duration || 0)}` +
+    `:${(c.contrast ?? 1).toFixed(2)}:${Math.round(c.trimStart || 0)}:${Math.round(c.trimEnd ?? c.duration)}`
   ).join('|');
   const force = el.reencodeToggle && el.reencodeToggle.checked ? 'R' : '';
   return `${clipSig}#${settings.resolution}/${settings.fps}/${settings.codec}/${settings.quality}#${force}#${musicEnabled ? 'M' : ''}`;
@@ -213,7 +248,8 @@ async function refreshEstimate(): Promise<void> {
     est = await window.api.estimateSize({
       clips: clips.map((c) => ({
         size: c.size, duration: c.duration, width: c.width, height: c.height,
-        fps: c.fps, vcodec: c.vcodec, compatKey: c.compatKey
+        fps: c.fps, vcodec: c.vcodec, compatKey: c.compatKey,
+        contrast: c.contrast, trimStart: c.trimStart, trimEnd: c.trimEnd
       })),
       settings,
       opts: { forceReencode: !!(el.reencodeToggle && el.reencodeToggle.checked), music: musicEnabled }
@@ -266,6 +302,12 @@ function renderList(): void {
     const audio = c.hasAudio ? `${c.acodec || 'audio'}` : 'no audio';
     const res = c.width && c.height ? `${c.width}×${c.height}` : '—';
     const fps = c.fps ? `${Math.round(c.fps)} fps` : '';
+    const edited = isEdited(c);
+    // When trimmed, show the kept length (and the original, struck through).
+    const durText = edited && effDur(c) < c.duration - 0.01
+      ? `${fmtDuration(effDur(c))} <span class="time-source">of ${fmtDuration(c.duration)}</span>`
+      : fmtDuration(c.duration);
+    const editTag = edited ? ` <span class="edit-badge" title="Edited: ${editLabel(c)}">✎</span>` : '';
 
     li.innerHTML = `
       <div class="drag-handle" title="Drag to reorder">⋮⋮</div>
@@ -274,12 +316,12 @@ function renderList(): void {
         ${c.thumb ? '' : '🎞️'}
       </div>
       <div class="clip-info">
-        <div class="clip-name" title="${escapeAttr(c.name)}">${escapeHtml(c.name)}</div>
+        <div class="clip-name" title="${escapeAttr(c.name)}">${escapeHtml(c.name)}${editTag}</div>
         <div class="clip-meta">
           <span title="Source: ${SOURCE_LABEL[c.timeSource] || c.timeSource}">${fmtTime(c.sortTime)}
             <span class="time-source">${SOURCE_LABEL[c.timeSource] || c.timeSource}</span>
           </span>
-          <span>${fmtDuration(c.duration)}</span>
+          <span>${durText}</span>
           <span class="${odd ? 'tag-warn' : ''}">${res}${fps ? ' · ' + fps : ''}</span>
           <span class="${odd ? 'tag-warn' : ''}">${c.vcodec || '?'} / ${audio}</span>
           <span>${fmtSize(c.size)}</span>
@@ -304,10 +346,10 @@ function renderTimeline(): void {
 
   clips.forEach((c, i) => {
     const odd = clips.length > 1 && c.compatKey !== major;
-    // Width is roughly proportional to clip duration, clamped to a sane range.
-    const width = Math.max(72, Math.min(Math.round((c.duration || 1) * 3.5), 260));
+    // Width is roughly proportional to the kept (trimmed) duration, clamped.
+    const width = Math.max(72, Math.min(Math.round((effDur(c) || 1) * 3.5), 260));
     const div = document.createElement('div');
-    div.className = 'tl-clip' + (odd ? ' compat-warn' : '');
+    div.className = 'tl-clip' + (odd ? ' compat-warn' : '') + (isEdited(c) ? ' edited' : '');
     div.draggable = true;
     div.dataset.id = String(c.id);
     div.dataset.index = String(i);
@@ -316,8 +358,8 @@ function renderTimeline(): void {
     div.innerHTML = `
       <div class="tl-num">${i + 1}</div>
       <div class="tl-label">
-        <div class="tl-name">${escapeHtml(c.name)}</div>
-        <div class="tl-dur">${fmtDuration(c.duration)}</div>
+        <div class="tl-name">${escapeHtml(c.name)}${isEdited(c) ? ' ✎' : ''}</div>
+        <div class="tl-dur">${fmtDuration(effDur(c))}</div>
       </div>
     `;
     tl.appendChild(div);
@@ -327,7 +369,7 @@ function renderTimeline(): void {
 }
 
 function updateSummary(): void {
-  const total = clips.reduce((s, c) => s + (c.duration || 0), 0);
+  const total = clips.reduce((s, c) => s + effDur(c), 0);
   const size = clips.reduce((s, c) => s + (c.size || 0), 0);
   el.clipCount.textContent = clips.length
     ? `${clips.length} clip${clips.length > 1 ? 's' : ''} · ${fmtSize(size)}`
@@ -400,6 +442,12 @@ function updateMergeControls(): void {
   el.openBtn.disabled = merging;
   el.musicToggle.disabled = !has || merging || musicFetching;
   el.musicVibe.disabled = !has || merging || musicFetching;
+
+  // Per-clip adjustment controls (no-op if a clip isn't selected/visible).
+  el.contrastSlider.disabled = merging;
+  el.trimStartSlider.disabled = merging;
+  el.trimEndSlider.disabled = merging;
+  el.resetEditsBtn.disabled = merging;
 }
 
 // ---------------------------------------------------------------------------
@@ -513,6 +561,85 @@ async function selectClip(id: number): Promise<void> {
     <div>Video: ${c.width}×${c.height} · ${Math.round(c.fps)} fps · ${c.vcodec || '?'} (${c.pixfmt || '?'})</div>
     <div>Audio: ${c.hasAudio ? `${c.acodec} · ${c.sampleRate} Hz · ${c.channels} ch` : 'none'}</div>
   `;
+
+  loadEditsPanel(c);
+}
+
+// ---------------------------------------------------------------------------
+// Per-clip adjustments (contrast + trim)
+// ---------------------------------------------------------------------------
+// Reflect the selected clip's edits into the panel controls.
+function loadEditsPanel(c: Clip): void {
+  el.clipEdits.hidden = false;
+  const dur = c.duration > 0 ? c.duration : 0;
+  el.contrastSlider.value = String(c.contrast ?? 1);
+  el.trimStartSlider.max = String(dur);
+  el.trimEndSlider.max = String(dur);
+  el.trimStartSlider.value = String(c.trimStart ?? 0);
+  el.trimEndSlider.value = String(c.trimEnd ?? dur);
+  el.previewVideo.style.filter = `contrast(${c.contrast ?? 1})`;
+  renderEditLabels(c);
+}
+
+// Update just the textual read-outs + summary for the selected clip.
+function renderEditLabels(c: Clip): void {
+  el.contrastVal.textContent = (c.contrast ?? 1).toFixed(2);
+  el.trimStartVal.textContent = fmtDuration(c.trimStart ?? 0);
+  el.trimEndVal.textContent = fmtDuration(c.trimEnd ?? c.duration);
+  const kept = effDur(c);
+  const trimmed = (c.trimStart ?? 0) > 0.01 || (c.trimEnd ?? c.duration) < c.duration - 0.01;
+  el.editSummary.textContent = trimmed
+    ? `Keeping ${fmtDuration(kept)} of ${fmtDuration(c.duration)}.`
+    : 'Full clip.';
+}
+
+// The clip currently shown in the preview/edit panel, if any.
+function selectedClip(): Clip | undefined {
+  return selectedId == null ? undefined : clips.find((x) => x.id === selectedId);
+}
+
+// Live-apply a slider change to the selected clip. `commit` (slider released)
+// refreshes the size estimate, timeline and list; dragging only updates the
+// cheap live bits (labels, preview filter/seek).
+function onEditInput(kind: 'contrast' | 'trimStart' | 'trimEnd', commit: boolean): void {
+  const c = selectedClip();
+  if (!c) return;
+  const dur = c.duration > 0 ? c.duration : 0;
+  if (kind === 'contrast') {
+    c.contrast = parseFloat(el.contrastSlider.value) || 1;
+    el.previewVideo.style.filter = `contrast(${c.contrast})`;
+  } else if (kind === 'trimStart') {
+    let start = parseFloat(el.trimStartSlider.value) || 0;
+    const end = c.trimEnd ?? dur;
+    if (start > end - 0.5) start = Math.max(0, end - 0.5); // keep at least 0.5s
+    c.trimStart = start;
+    el.trimStartSlider.value = String(start);
+    seekPreview(start);
+  } else {
+    let end = parseFloat(el.trimEndSlider.value) || dur;
+    const start = c.trimStart ?? 0;
+    if (end < start + 0.5) end = Math.min(dur, start + 0.5);
+    c.trimEnd = end;
+    el.trimEndSlider.value = String(end);
+    seekPreview(end);
+  }
+  renderEditLabels(c);
+  if (commit) { renderList(); renderTimeline(); updateSummary(); }
+}
+
+// Seek the preview to a given time so the user sees the trimmed frame.
+function seekPreview(t: number): void {
+  try { if (isFinite(t)) el.previewVideo.currentTime = Math.max(0, t); } catch { /* not ready yet */ }
+}
+
+function resetEdits(): void {
+  const c = selectedClip();
+  if (!c) return;
+  c.contrast = 1;
+  c.trimStart = 0;
+  c.trimEnd = c.duration;
+  loadEditsPanel(c);
+  renderList(); renderTimeline(); updateSummary();
 }
 
 function removeClip(id: number): void {
@@ -613,7 +740,7 @@ async function scan(dir: string): Promise<void> {
     return;
   }
 
-  clips = result.clips.map((c) => ({ ...c, thumb: null }));
+  clips = result.clips.map((c) => ({ ...c, thumb: null, contrast: 1, trimStart: 0, trimEnd: c.duration }));
   el.loadingState.hidden = true;
 
   if (clips.length === 0) {
@@ -675,7 +802,8 @@ async function startMerge(): Promise<void> {
     const est = await window.api.estimateSize({
       clips: clips.map((c) => ({
         size: c.size, duration: c.duration, width: c.width, height: c.height,
-        fps: c.fps, vcodec: c.vcodec, compatKey: c.compatKey
+        fps: c.fps, vcodec: c.vcodec, compatKey: c.compatKey,
+        contrast: c.contrast, trimStart: c.trimStart, trimEnd: c.trimEnd
       })),
       settings,
       opts: { forceReencode, music: musicEnabled }
@@ -729,7 +857,10 @@ async function startMerge(): Promise<void> {
       vcodec: c.vcodec,
       compatKey: c.compatKey,
       name: c.name,
-      size: c.size // used to plan size-limited splitting
+      size: c.size, // used to plan size-limited splitting
+      contrast: c.contrast, // per-clip edits (force re-encode of the clip)
+      trimStart: c.trimStart,
+      trimEnd: c.trimEnd
     }))
   };
 
@@ -1163,6 +1294,15 @@ function init(): void {
   el.previewPane = $('previewPane');
   el.previewVideo = $<HTMLVideoElement>('previewVideo');
   el.previewInfo = $('previewInfo');
+  el.clipEdits = $('clipEdits');
+  el.resetEditsBtn = $<HTMLButtonElement>('resetEditsBtn');
+  el.contrastSlider = $<HTMLInputElement>('contrastSlider');
+  el.contrastVal = $('contrastVal');
+  el.trimStartSlider = $<HTMLInputElement>('trimStartSlider');
+  el.trimStartVal = $('trimStartVal');
+  el.trimEndSlider = $<HTMLInputElement>('trimEndSlider');
+  el.trimEndVal = $('trimEndVal');
+  el.editSummary = $('editSummary');
   el.timeline = $('timeline');
   el.totalDuration = $('totalDuration');
   el.compatBadge = $('compatBadge');
@@ -1220,6 +1360,14 @@ function init(): void {
   el.mergeBtn.addEventListener('click', startMerge);
   el.cancelBtn.addEventListener('click', () => window.api.cancelMerge());
   el.reencodeToggle.addEventListener('change', updateSummary); // refresh size estimate
+  // Per-clip adjustments: live-update while dragging, commit (estimate/render) on release.
+  el.contrastSlider.addEventListener('input', () => onEditInput('contrast', false));
+  el.contrastSlider.addEventListener('change', () => onEditInput('contrast', true));
+  el.trimStartSlider.addEventListener('input', () => onEditInput('trimStart', false));
+  el.trimStartSlider.addEventListener('change', () => onEditInput('trimStart', true));
+  el.trimEndSlider.addEventListener('input', () => onEditInput('trimEnd', false));
+  el.trimEndSlider.addEventListener('change', () => onEditInput('trimEnd', true));
+  el.resetEditsBtn.addEventListener('click', resetEdits);
   el.musicToggle.addEventListener('change', onMusicToggle);
   el.musicVibe.addEventListener('change', onMusicVibeChange);
   el.musicCreditsBtn.addEventListener('click', showMusicCredits);

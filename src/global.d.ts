@@ -40,8 +40,19 @@ interface ProbeResult {
   creationTimeTag: string | null;
 }
 
+// Per-clip edits applied before merging. Defaults mean "no edit": contrast 1
+// and no trim. A clip carrying ANY edit is always re-encoded — pixels can't be
+// changed, nor frames cut frame-accurately, on a lossless stream copy. `trimEnd`
+// is the out-point in seconds from the start of the source (so the kept span is
+// [trimStart, trimEnd] and its length is trimEnd - trimStart).
+interface ClipEdits {
+  contrast?: number;
+  trimStart?: number;
+  trimEnd?: number;
+}
+
 // A scanned, orderable clip. `thumb` is filled in asynchronously in the renderer.
-interface Clip {
+interface Clip extends ClipEdits {
   id: number;
   path: string;
   name: string;
@@ -71,7 +82,7 @@ interface VideoSpecClip {
   fps: number;
   vcodec: string | null;
 }
-interface MergeClip extends VideoSpecClip {
+interface MergeClip extends VideoSpecClip, ClipEdits {
   path: string;
   duration: number;
   hasAudio: boolean;
@@ -82,7 +93,7 @@ interface MergeClip extends VideoSpecClip {
   // engine falls back to statting the file when absent.
   size?: number;
 }
-interface EstimateClip extends VideoSpecClip {
+interface EstimateClip extends VideoSpecClip, ClipEdits {
   size: number;
   duration: number;
   compatKey: string;

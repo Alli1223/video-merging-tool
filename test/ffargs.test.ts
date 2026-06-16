@@ -8,7 +8,8 @@ import {
   estimatedVideoBitrate, estimateMergeBytes,
   buildVerifyArgs, buildVideoCrcArgs, buildSpotCheckArgs, parseCrcOutput, durationTolerance, assessIntegrity,
   verifyEnabled, spotCheckOffsets,
-  splitLimitBytes, partPath, planParts
+  splitLimitBytes, partPath, planParts,
+  effectiveDuration, clipEdited
 } from '../src/ffargs';
 
 test('parseFps handles fractions and edge cases', () => {
@@ -503,4 +504,53 @@ test('buildSpotCheckArgs fast-seeks and decodes a short window into null', () =>
   assert.ok(s.includes('-v error'));    // only decode errors on stderr
   // a negative offset is clamped to 0
   assert.ok(buildSpotCheckArgs('/o.mp4', -5, 2).join(' ').includes('-ss 0'));
+});
+
+test('effectiveDuration returns the kept span after trimming', () => {
+  assert.equal(effectiveDuration({ duration: 10 }), 10);                          // untrimmed
+  assert.equal(effectiveDuration({ duration: 10, trimStart: 2 }), 8);             // start only
+  assert.equal(effectiveDuration({ duration: 10, trimStart: 2, trimEnd: 8 }), 6); // start + end
+  assert.equal(effectiveDuration({ duration: 10, trimEnd: 4 }), 4);              // end only
+  assert.equal(effectiveDuration({ duration: 10, trimEnd: 99 }), 10);            // end clamped to duration
+  assert.equal(effectiveDuration({ duration: 10, trimStart: 99 }), 0);          // start past end -> 0
+});
+
+test('clipEdited detects contrast changes and trims', () => {
+  assert.equal(clipEdited({ duration: 10 }), false);
+  assert.equal(clipEdited({ duration: 10, contrast: 1 }), false);
+  assert.equal(clipEdited({ duration: 10, contrast: 1.3 }), true);
+  assert.equal(clipEdited({ duration: 10, trimStart: 1 }), true);
+  assert.equal(clipEdited({ duration: 10, trimEnd: 9 }), true);   // end trimmed in
+  assert.equal(clipEdited({ duration: 10, trimEnd: 10 }), false); // end at full length
+});
+
+test('buildSegmentArgs applies contrast and trim on the re-encode path', () => {
+  const clip = { path: '/a.mp4', hasAudio: true, duration: 10, contrast: 1.5, trimStart: 2, trimEnd: 8 };
+  const args = buildSegmentArgs(clip, { W: 1920, H: 1080, F: 30 }, { codec: 'h264', useNvenc: false, quality: 'near' }, '/seg.ts', false);
+  const s = args.join(' ');
+  assert.ok(s.includes('-ss 2'));                    // seek to the in-point
+  assert.ok(args.indexOf('-ss') < args.indexOf('-i')); // fast input seek (before -i)
+  assert.ok(s.includes('eq=contrast=1.5'));          // contrast filter in the chain
+  assert.ok(s.includes('-t 6'));                     // capped to the 6s kept span
+});
+
+test('buildSegmentArgs adds no trim/contrast args for an unedited clip', () => {
+  const clip = { path: '/a.mp4', hasAudio: true, duration: 10 };
+  const s = buildSegmentArgs(clip, { W: 1920, H: 1080, F: 30 }, { codec: 'h264', useNvenc: false, quality: 'near' }, '/seg.ts', false).join(' ');
+  assert.ok(!s.includes('-ss'));
+  assert.ok(!s.includes('eq=contrast'));
+  assert.ok(!s.includes('-t '));
+});
+
+test('estimateMergeBytes treats an edited clip as re-encoded, not a copy', () => {
+  const base = { width: 1920, height: 1080, fps: 30, vcodec: 'h264', compatKey: 'k', size: 100e6, duration: 60 };
+  const settings = { resolution: '1080' as const, fps: '30' as const, codec: 'h264' as const, quality: 'near' as const };
+  // Unedited clip that matches the target -> pure lossless copy.
+  assert.equal(estimateMergeBytes([base], settings, {}).pureCopy, true);
+  // A contrast change forces a re-encode, so it's no longer a pure copy.
+  assert.equal(estimateMergeBytes([{ ...base, contrast: 1.5 }], settings, {}).pureCopy, false);
+  // Trimming to half the length roughly halves the re-encode estimate.
+  const full = estimateMergeBytes([{ ...base, contrast: 1.5 }], settings, {}).bytes;
+  const half = estimateMergeBytes([{ ...base, contrast: 1.5, trimStart: 0, trimEnd: 30 }], settings, {}).bytes;
+  assert.ok(half < full && half > full * 0.4);
 });

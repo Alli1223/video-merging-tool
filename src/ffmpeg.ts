@@ -9,7 +9,8 @@ import {
   resolveTarget, buildSegmentArgs, parseProgressTime, computePercent,
   planMusic, buildLoopUnitArgs, buildMusicMuxArgs,
   buildVerifyArgs, buildVideoCrcArgs, buildSpotCheckArgs, parseCrcOutput, assessIntegrity, durationTolerance,
-  verifyEnabled, spotCheckOffsets, splitLimitBytes, partPath, planParts
+  verifyEnabled, spotCheckOffsets, splitLimitBytes, partPath, planParts,
+  effectiveDuration, clipEdited
 } from './ffargs';
 import * as log from './logger';
 
@@ -552,7 +553,9 @@ async function mergeHybrid(clips: MergeClip[], outputPath: string, target: Targe
       // MPEG-TS segments so copied + re-encoded clips (different parameter sets)
       // can be stream-copy-joined without corruption — see buildSegmentArgs.
       const seg = path.join(tmpDir, `seg-${String(i).padStart(4, '0')}.ts`);
-      let copyNow = !forceReencode && matchesTargetVideo(clip, target, codecName);
+      // An edited clip (contrast/trim) must be re-encoded, never stream-copied.
+      let copyNow = !forceReencode && matchesTargetVideo(clip, target, codecName) && !clipEdited(clip);
+      const segDur = effectiveDuration(clip); // kept length after any trim
       const base = done;
       const onSeg: ProgressCb = (p) => {
         // Per-clip processing occupies 0..92% of the progress bar.
@@ -568,7 +571,7 @@ async function mergeHybrid(clips: MergeClip[], outputPath: string, target: Targe
       };
       const buildSegment = async (): Promise<void> => {
         try {
-          await runFfmpeg(buildSegmentArgs(clip, target, { ...encOpts, useNvenc: useNvencNow }, seg, copyNow), clip.duration || 0, onSeg);
+          await runFfmpeg(buildSegmentArgs(clip, target, { ...encOpts, useNvenc: useNvencNow }, seg, copyNow), segDur, onSeg);
         } catch (e) {
           if (canceled) throw e;
           if (copyNow) {
@@ -587,7 +590,7 @@ async function mergeHybrid(clips: MergeClip[], outputPath: string, target: Targe
           log.warn(`GPU encode failed for clip ${i + 1}; retrying this and the remaining clips on CPU:`, errMsg(e));
           useNvencNow = false;
           safeUnlink(seg);
-          await runFfmpeg(buildSegmentArgs(clip, target, { ...encOpts, useNvenc: false }, seg, false), clip.duration || 0, onSeg);
+          await runFfmpeg(buildSegmentArgs(clip, target, { ...encOpts, useNvenc: false }, seg, false), segDur, onSeg);
         }
       };
       await buildSegment();
@@ -605,7 +608,7 @@ async function mergeHybrid(clips: MergeClip[], outputPath: string, target: Targe
           phase: 'verifying', clip: i + 1, total: clips.length, clipName
         });
         let report = await verifyFile(seg, {
-          expectedDuration: clip.duration || 0,
+          expectedDuration: segDur,
           crcCompareSource: copyNow ? clip.path : null,
           onProgress: onVerify
         });
@@ -619,7 +622,7 @@ async function mergeHybrid(clips: MergeClip[], outputPath: string, target: Targe
           if (!wasCopy) useNvencNow = false;
           safeUnlink(seg);
           await buildSegment();
-          report = await verifyFile(seg, { expectedDuration: clip.duration || 0, onProgress: onVerify });
+          report = await verifyFile(seg, { expectedDuration: segDur, onProgress: onVerify });
           if (report.ok) {
             if (!repaired.some((r) => r.name === clipName)) repaired.push({ name: clipName, reason });
             log.info(`Clip ${i + 1} (${clipName}) repaired by re-encoding (original problem: ${reason}).`);
@@ -632,7 +635,7 @@ async function mergeHybrid(clips: MergeClip[], outputPath: string, target: Targe
         }
       }
 
-      done += clip.duration || 0;
+      done += segDur;
       segments.push(seg);
     }
 
@@ -755,7 +758,7 @@ async function mergeSingle(opts: MergeOptions, onProgress: ProgressCb): Promise<
   const encOpts: EncodeOpts = { codec, useNvenc, quality };
   log.info('Merge:', { clips: clips.length, target, codec, quality, encoder: wanted, useNvenc });
 
-  const totalDuration = clips.reduce((sum, c) => sum + (c.duration || 0), 0);
+  const totalDuration = clips.reduce((sum, c) => sum + effectiveDuration(c), 0);
 
   // Optional background music. When requested, the clips are merged to a temp
   // (silent) video first, then a music bed is added in a video-copy pass. The
@@ -767,6 +770,9 @@ async function mergeSingle(opts: MergeOptions, onProgress: ProgressCb): Promise<
   try {
     const allMatch = clips.every((c) => matchesTargetVideo(c, target, codec));
     const allCompat = new Set(clips.map((c) => c.compatKey)).size === 1;
+    // Any contrast/trim edit forces re-encoding, so a pure lossless copy of the
+    // whole timeline is only possible when no clip is edited.
+    const anyEdited = clips.some((c) => clipEdited(c));
 
     // The merge work fills 0..86% of the (video-side) progress and the
     // post-merge verification 86..100%; with verification off the merge fills
@@ -777,7 +783,7 @@ async function mergeSingle(opts: MergeOptions, onProgress: ProgressCb): Promise<
       videoProgress({ percent: 86 + (p.percent || 0) * 0.14, phase: 'verifying', seconds: p.seconds, totalDuration });
 
     let result: MergeResult;
-    if (!forceReencode && allMatch && allCompat) {
+    if (!forceReencode && allMatch && allCompat && !anyEdited) {
       result = await mergeCopy(clips, videoTarget, totalDuration, workProgress);
     } else {
       result = await mergeHybrid(clips, videoTarget, target, encOpts, codec, totalDuration, workProgress, forceReencode);
@@ -891,7 +897,8 @@ async function mergeSplit(opts: MergeOptions, limitBytes: number, onProgress: Pr
   const planClips: EstimateClip[] = clips.map((c) => ({
     width: c.width, height: c.height, fps: c.fps, vcodec: c.vcodec,
     compatKey: c.compatKey, duration: c.duration || 0,
-    size: c.size != null ? c.size : statBytes(c.path)
+    size: c.size != null ? c.size : statBytes(c.path),
+    contrast: c.contrast, trimStart: c.trimStart, trimEnd: c.trimEnd
   }));
   // Pin the target from the FULL clip list so every part matches.
   const targetOverride = opts.targetOverride || resolveTarget(clips, settings);
@@ -908,7 +915,7 @@ async function mergeSplit(opts: MergeOptions, limitBytes: number, onProgress: Pr
       'Lower the quality, turn on "Force re-encode every clip", or raise the split limit.');
   }
 
-  const totalDuration = clips.reduce((s, c) => s + (c.duration || 0), 0);
+  const totalDuration = clips.reduce((s, c) => s + effectiveDuration(c), 0);
   log.info(`Split merge: limit ${fmtGB(limitBytes)}, ${queue.length} planned part(s):`,
     queue.map((p) => `clips ${p.start + 1}-${p.end + 1} ~${fmtGB(p.estBytes)}${p.exact ? ' (exact)' : ''}`).join(', '));
 
@@ -927,7 +934,7 @@ async function mergeSplit(opts: MergeOptions, limitBytes: number, onProgress: Pr
       if (canceled) { cleanupParts(); return { success: false, canceled: true }; }
       const range = queue.shift() as PartPlan;
       const partClips = clips.slice(range.start, range.end + 1);
-      const partDuration = partClips.reduce((s, c) => s + (c.duration || 0), 0);
+      const partDuration = partClips.reduce((s, c) => s + effectiveDuration(c), 0);
       const partNo = parts.length + 1;
       const partsKnown = parts.length + 1 + queue.length;
       // A merge that fits in one file keeps the chosen name; real parts get a
