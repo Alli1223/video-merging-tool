@@ -29,9 +29,10 @@ drag-and-drop timeline, and merges them into a single file.
   file's created/modified time. Each row shows which source was used.
 - **Drag-to-reorder timeline** — reorder clips in the list *or* the timeline
   strip at the bottom; the two stay in sync.
-- **Per-clip contrast & trim** — select a clip and, in the preview pane, boost
-  its contrast or drag the start/end handles to cut its beginning and end (with
-  a live preview). Only the clips you edit are re-encoded; the rest stay lossless.
+- **Per-clip contrast, saturation & trim** — select a clip and, in the preview
+  pane, adjust its contrast or colour saturation, or drag the start/end handles
+  to cut its beginning and end (all with a live preview). Only the clips you edit
+  are re-encoded; the rest stay lossless.
 - **Bundled FFmpeg** — `ffmpeg` and `ffprobe` ship via npm
   (`ffmpeg-static` / `ffprobe-static`); nothing else to install.
 - **Shuffle & manual control** — randomize the order with one click (**🔀 Shuffle**),
@@ -129,9 +130,9 @@ metadata that powers in-app auto-update — to a GitHub Release for that tag.
 4. If the badge shows **⚠ Mixed formats**, either leave **Re-encode** on, or click
    **Drop N mismatched** to remove the odd-format clips so the rest merge
    losslessly.
-5. Click a clip to preview it. In the preview pane you can **boost its contrast**
-   and **trim its start/end** with the sliders (a ✎ marks edited clips). Edited
-   clips are re-encoded; untouched clips stay lossless.
+5. Click a clip to preview it. In the preview pane you can adjust its **contrast**
+   and **saturation** and **trim its start/end** with the sliders (a ✎ marks
+   edited clips). Edited clips are re-encoded; untouched clips stay lossless.
 6. Optionally click **📂 Save to…** to choose the output location up front
    (otherwise you'll be prompted when you merge).
 7. Click **Merge ▶** and watch the progress bar.
@@ -195,9 +196,16 @@ that on faith:
    decoded and stream copies are **CRC-32 compared against their source** (via
    FFmpeg's `crc` muxer, container-independent) — to pinpoint and re-encode just
    the damaged clip(s); decoding conceals the damaged regions instead of copying
-   them. If it still won't verify, the whole thing is redone as a single-pass
-   re-encode. The result panel reports what was repaired (e.g. *"1 corrupted
-   clip was detected and re-encoded"*) and ends with *"integrity verified ✓"*.
+   them. The result panel reports what was repaired (e.g. *"1 corrupted clip was
+   detected and re-encoded"*) and ends with *"integrity verified ✓"*.
+3. **Bad clips are cut out, never the whole job.** A clip that can't be turned
+   into a usable segment — it won't encode at all, or it still fails its check
+   after a re-encode — is **dropped** from the merge and the rest finishes
+   normally; the result lists which clips were left out. So one corrupt file in a
+   long batch costs you that clip, not the entire export, and never an endless
+   re-encode restart. Any full re-encode the engine does (e.g. after a failed
+   join) runs **clip-by-clip** so memory stays flat — it never opens every input
+   at once.
 
 Because the heavy per-clip decoding now happens **only when corruption is
 actually detected**, a clean merge pays just one quick pass (or none, if you

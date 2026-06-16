@@ -36,6 +36,8 @@ interface Elements {
   resetEditsBtn: HTMLButtonElement;
   contrastSlider: HTMLInputElement;
   contrastVal: HTMLElement;
+  saturationSlider: HTMLInputElement;
+  saturationVal: HTMLElement;
   trimStartSlider: HTMLInputElement;
   trimStartVal: HTMLElement;
   trimEndSlider: HTMLInputElement;
@@ -158,9 +160,10 @@ function effDur(c: Clip): number {
   return Math.max(0, end - start);
 }
 
-// Has the user changed this clip's contrast or trimmed it? (mirrors clipEdited)
+// Has the user changed this clip's contrast/saturation or trimmed it? (mirrors clipEdited)
 function isEdited(c: Clip): boolean {
   return (c.contrast != null && Math.abs(c.contrast - 1) > 1e-3)
+    || (c.saturation != null && Math.abs(c.saturation - 1) > 1e-3)
     || (c.trimStart || 0) > 0.01
     || (c.trimEnd != null && c.trimEnd < c.duration - 0.01);
 }
@@ -169,6 +172,7 @@ function isEdited(c: Clip): boolean {
 function editLabel(c: Clip): string {
   const bits: string[] = [];
   if (c.contrast != null && Math.abs(c.contrast - 1) > 1e-3) bits.push(`contrast ${c.contrast.toFixed(2)}`);
+  if (c.saturation != null && Math.abs(c.saturation - 1) > 1e-3) bits.push(`saturation ${c.saturation.toFixed(2)}`);
   const start = c.trimStart || 0;
   const end = c.trimEnd != null ? c.trimEnd : c.duration;
   if (start > 0.01 || end < c.duration - 0.01) bits.push(`trim ${fmtDuration(start)}→${fmtDuration(end)}`);
@@ -231,7 +235,7 @@ function outputPlan(): { t: Target; codec: Codec; matching: number; pureCopy: bo
 function estimateSignature(): string {
   const clipSig = clips.map((c) =>
     `${c.id}:${c.size}:${c.width}x${c.height}:${Math.round(c.fps || 0)}:${c.vcodec}:${c.compatKey}:${Math.round(c.duration || 0)}` +
-    `:${(c.contrast ?? 1).toFixed(2)}:${Math.round(c.trimStart || 0)}:${Math.round(c.trimEnd ?? c.duration)}`
+    `:${(c.contrast ?? 1).toFixed(2)}:${(c.saturation ?? 1).toFixed(2)}:${Math.round(c.trimStart || 0)}:${Math.round(c.trimEnd ?? c.duration)}`
   ).join('|');
   const force = el.reencodeToggle && el.reencodeToggle.checked ? 'R' : '';
   return `${clipSig}#${settings.resolution}/${settings.fps}/${settings.codec}/${settings.quality}#${force}#${musicEnabled ? 'M' : ''}`;
@@ -249,7 +253,7 @@ async function refreshEstimate(): Promise<void> {
       clips: clips.map((c) => ({
         size: c.size, duration: c.duration, width: c.width, height: c.height,
         fps: c.fps, vcodec: c.vcodec, compatKey: c.compatKey,
-        contrast: c.contrast, trimStart: c.trimStart, trimEnd: c.trimEnd
+        contrast: c.contrast, saturation: c.saturation, trimStart: c.trimStart, trimEnd: c.trimEnd
       })),
       settings,
       opts: { forceReencode: !!(el.reencodeToggle && el.reencodeToggle.checked), music: musicEnabled }
@@ -445,6 +449,7 @@ function updateMergeControls(): void {
 
   // Per-clip adjustment controls (no-op if a clip isn't selected/visible).
   el.contrastSlider.disabled = merging;
+  el.saturationSlider.disabled = merging;
   el.trimStartSlider.disabled = merging;
   el.trimEndSlider.disabled = merging;
   el.resetEditsBtn.disabled = merging;
@@ -573,17 +578,25 @@ function loadEditsPanel(c: Clip): void {
   el.clipEdits.hidden = false;
   const dur = c.duration > 0 ? c.duration : 0;
   el.contrastSlider.value = String(c.contrast ?? 1);
+  el.saturationSlider.value = String(c.saturation ?? 1);
   el.trimStartSlider.max = String(dur);
   el.trimEndSlider.max = String(dur);
   el.trimStartSlider.value = String(c.trimStart ?? 0);
   el.trimEndSlider.value = String(c.trimEnd ?? dur);
-  el.previewVideo.style.filter = `contrast(${c.contrast ?? 1})`;
+  el.previewVideo.style.filter = previewFilter(c);
   renderEditLabels(c);
+}
+
+// CSS filter that previews the clip's colour edits live on the <video> element
+// (matches the eq=contrast/saturation applied at merge time).
+function previewFilter(c: Clip): string {
+  return `contrast(${c.contrast ?? 1}) saturate(${c.saturation ?? 1})`;
 }
 
 // Update just the textual read-outs + summary for the selected clip.
 function renderEditLabels(c: Clip): void {
   el.contrastVal.textContent = (c.contrast ?? 1).toFixed(2);
+  el.saturationVal.textContent = (c.saturation ?? 1).toFixed(2);
   el.trimStartVal.textContent = fmtDuration(c.trimStart ?? 0);
   el.trimEndVal.textContent = fmtDuration(c.trimEnd ?? c.duration);
   const kept = effDur(c);
@@ -601,13 +614,16 @@ function selectedClip(): Clip | undefined {
 // Live-apply a slider change to the selected clip. `commit` (slider released)
 // refreshes the size estimate, timeline and list; dragging only updates the
 // cheap live bits (labels, preview filter/seek).
-function onEditInput(kind: 'contrast' | 'trimStart' | 'trimEnd', commit: boolean): void {
+function onEditInput(kind: 'contrast' | 'saturation' | 'trimStart' | 'trimEnd', commit: boolean): void {
   const c = selectedClip();
   if (!c) return;
   const dur = c.duration > 0 ? c.duration : 0;
   if (kind === 'contrast') {
     c.contrast = parseFloat(el.contrastSlider.value) || 1;
-    el.previewVideo.style.filter = `contrast(${c.contrast})`;
+    el.previewVideo.style.filter = previewFilter(c);
+  } else if (kind === 'saturation') {
+    c.saturation = parseFloat(el.saturationSlider.value) || 1;
+    el.previewVideo.style.filter = previewFilter(c);
   } else if (kind === 'trimStart') {
     let start = parseFloat(el.trimStartSlider.value) || 0;
     const end = c.trimEnd ?? dur;
@@ -636,6 +652,7 @@ function resetEdits(): void {
   const c = selectedClip();
   if (!c) return;
   c.contrast = 1;
+  c.saturation = 1;
   c.trimStart = 0;
   c.trimEnd = c.duration;
   loadEditsPanel(c);
@@ -740,7 +757,7 @@ async function scan(dir: string): Promise<void> {
     return;
   }
 
-  clips = result.clips.map((c) => ({ ...c, thumb: null, contrast: 1, trimStart: 0, trimEnd: c.duration }));
+  clips = result.clips.map((c) => ({ ...c, thumb: null, contrast: 1, saturation: 1, trimStart: 0, trimEnd: c.duration }));
   el.loadingState.hidden = true;
 
   if (clips.length === 0) {
@@ -803,7 +820,7 @@ async function startMerge(): Promise<void> {
       clips: clips.map((c) => ({
         size: c.size, duration: c.duration, width: c.width, height: c.height,
         fps: c.fps, vcodec: c.vcodec, compatKey: c.compatKey,
-        contrast: c.contrast, trimStart: c.trimStart, trimEnd: c.trimEnd
+        contrast: c.contrast, saturation: c.saturation, trimStart: c.trimStart, trimEnd: c.trimEnd
       })),
       settings,
       opts: { forceReencode, music: musicEnabled }
@@ -859,6 +876,7 @@ async function startMerge(): Promise<void> {
       name: c.name,
       size: c.size, // used to plan size-limited splitting
       contrast: c.contrast, // per-clip edits (force re-encode of the clip)
+      saturation: c.saturation,
       trimStart: c.trimStart,
       trimEnd: c.trimEnd
     }))
@@ -898,14 +916,26 @@ async function startMerge(): Promise<void> {
         msg = `Done — saved to ${res.outputPath}`;
       }
       if (bits.length) msg += ` (${bits.join('; ')})`;
+
+      // Clips that couldn't be processed were cut out so the merge could finish —
+      // call this out clearly (and don't show a plain green "success").
+      let dropNote = '';
+      if (res.dropped && res.dropped.length) {
+        const names = res.dropped.map((d) => baseName(d.name));
+        const shown = names.slice(0, 3).join(', ') + (names.length > 3 ? `, +${names.length - 3} more` : '');
+        const n = res.dropped.length;
+        dropNote = `\n⚠ ${n} clip${n > 1 ? 's were' : ' was'} left out because ${n > 1 ? 'they' : 'it'} couldn't be processed: ${shown}`;
+      }
+
       if (res.verified === false) {
         // Saved, but the integrity pass couldn't confirm the file is clean —
         // show neutrally (not green) with the reason.
-        msg += `\n⚠ The integrity check could not confirm the output is fully clean${res.verifyNote ? ': ' + res.verifyNote : '.'}`;
+        msg += dropNote + `\n⚠ The integrity check could not confirm the output is fully clean${res.verifyNote ? ': ' + res.verifyNote : '.'}`;
         setStatus(msg);
       } else {
         if (res.verified) msg += ' · integrity verified ✓';
-        setStatus(msg, 'success');
+        if (dropNote) setStatus(msg + dropNote); // neutral, not green — content was left out
+        else setStatus(msg, 'success');
       }
       el.showBtn.hidden = false;
     }
@@ -1298,6 +1328,8 @@ function init(): void {
   el.resetEditsBtn = $<HTMLButtonElement>('resetEditsBtn');
   el.contrastSlider = $<HTMLInputElement>('contrastSlider');
   el.contrastVal = $('contrastVal');
+  el.saturationSlider = $<HTMLInputElement>('saturationSlider');
+  el.saturationVal = $('saturationVal');
   el.trimStartSlider = $<HTMLInputElement>('trimStartSlider');
   el.trimStartVal = $('trimStartVal');
   el.trimEndSlider = $<HTMLInputElement>('trimEndSlider');
@@ -1363,6 +1395,8 @@ function init(): void {
   // Per-clip adjustments: live-update while dragging, commit (estimate/render) on release.
   el.contrastSlider.addEventListener('input', () => onEditInput('contrast', false));
   el.contrastSlider.addEventListener('change', () => onEditInput('contrast', true));
+  el.saturationSlider.addEventListener('input', () => onEditInput('saturation', false));
+  el.saturationSlider.addEventListener('change', () => onEditInput('saturation', true));
   el.trimStartSlider.addEventListener('input', () => onEditInput('trimStart', false));
   el.trimStartSlider.addEventListener('change', () => onEditInput('trimStart', true));
   el.trimEndSlider.addEventListener('input', () => onEditInput('trimEnd', false));

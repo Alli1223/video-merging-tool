@@ -40,13 +40,14 @@ interface ProbeResult {
   creationTimeTag: string | null;
 }
 
-// Per-clip edits applied before merging. Defaults mean "no edit": contrast 1
-// and no trim. A clip carrying ANY edit is always re-encoded — pixels can't be
-// changed, nor frames cut frame-accurately, on a lossless stream copy. `trimEnd`
-// is the out-point in seconds from the start of the source (so the kept span is
-// [trimStart, trimEnd] and its length is trimEnd - trimStart).
+// Per-clip edits applied before merging. Defaults mean "no edit": contrast and
+// saturation 1, no trim. A clip carrying ANY edit is always re-encoded — pixels
+// can't be changed, nor frames cut frame-accurately, on a lossless stream copy.
+// `trimEnd` is the out-point in seconds from the start of the source (so the
+// kept span is [trimStart, trimEnd] and its length is trimEnd - trimStart).
 interface ClipEdits {
   contrast?: number;
+  saturation?: number;
   trimStart?: number;
   trimEnd?: number;
 }
@@ -194,6 +195,12 @@ interface MergeResult {
   verified?: boolean;
   /** Clips that failed their integrity check and were rebuilt by re-encoding. */
   repaired?: RepairedClip[];
+  /** Clips dropped from the merge because they could not be processed/verified
+   *  even after a re-encode — cut out so one bad file can't fail the whole job. */
+  dropped?: DroppedClip[];
+  /** Actual decodable duration produced (below the input total when clips were
+   *  dropped) — what the post-merge verification and music length use. */
+  outputDuration?: number;
   /** Human-readable detail when something could not be verified or fixed. */
   verifyNote?: string;
 }
@@ -232,6 +239,10 @@ interface IntegrityInput {
   expectedCrc?: string | null;
 }
 interface RepairedClip {
+  name: string;
+  reason: VerifyIssueKind;
+}
+interface DroppedClip {
   name: string;
   reason: VerifyIssueKind;
 }

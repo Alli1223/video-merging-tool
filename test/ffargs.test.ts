@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseFps, concatPath, concatListContent, isMp4Like,
-  buildCopyArgs, reencodeTarget, buildReencodeArgs, parseProgressTime, computePercent,
+  buildCopyArgs, reencodeTarget, parseProgressTime, computePercent,
   resolveTarget, buildVideoEncodeArgs, buildSegmentArgs,
   planMusic, buildLoopUnitArgs, buildMusicMuxArgs,
   estimatedVideoBitrate, estimateMergeBytes,
@@ -65,38 +65,6 @@ test('reencodeTarget picks the largest even dimensions and capped fps', () => {
 
   // very high fps is capped at 60
   assert.deepEqual(reencodeTarget([{ width: 100, height: 100, fps: 240 }]), { W: 100, H: 100, F: 60 });
-});
-
-test('buildReencodeArgs builds an A/V concat graph and injects silent audio', () => {
-  const clips = [
-    { path: '/a.mp4', width: 1280, height: 720, fps: 30, hasAudio: true, duration: 5 },
-    { path: '/b.mp4', width: 640, height: 480, fps: 30, hasAudio: false, duration: 3 } // no audio
-  ];
-  const { args, filterComplex } = buildReencodeArgs(clips, '/out.mp4', '/tmp/f.txt');
-  const s = args.join(' ');
-
-  assert.equal(args.filter((x) => x === '-i').length, 3);   // 2 real inputs + 1 anullsrc
-  assert.ok(s.includes('anullsrc'));                         // silent track injected (input)
-  assert.ok(s.includes('-filter_complex_script /tmp/f.txt')); // graph via file, not inline
-  assert.ok(filterComplex.includes('concat=n=2:v=1:a=1'));   // 2 segments, video + audio
-  assert.ok(filterComplex.includes('scale=1280:720'));       // target = largest dims
-  assert.ok(!filterComplex.includes('scale=1920'));
-  assert.ok(s.includes('libx264'));
-  assert.ok(s.includes('-c:a') && s.includes('aac'));
-  assert.equal(args[args.length - 1], '/out.mp4');
-});
-
-test('buildReencodeArgs handles all-audioless clips (no audio track)', () => {
-  const clips = [
-    { path: '/a.mp4', width: 1280, height: 720, fps: 30, hasAudio: false, duration: 5 },
-    { path: '/b.mp4', width: 1280, height: 720, fps: 30, hasAudio: false, duration: 3 }
-  ];
-  const { args, filterComplex } = buildReencodeArgs(clips, '/out.mp4', '/tmp/f.txt');
-  const s = args.join(' ');
-  assert.ok(filterComplex.includes('concat=n=2:v=1:a=0'));
-  assert.ok(s.includes('-an'));
-  assert.ok(!filterComplex.includes('anullsrc'));
-  assert.ok(!s.includes('anullsrc'));
 });
 
 test('parseProgressTime extracts seconds from ffmpeg -progress output', () => {
@@ -515,30 +483,38 @@ test('effectiveDuration returns the kept span after trimming', () => {
   assert.equal(effectiveDuration({ duration: 10, trimStart: 99 }), 0);          // start past end -> 0
 });
 
-test('clipEdited detects contrast changes and trims', () => {
+test('clipEdited detects contrast/saturation changes and trims', () => {
   assert.equal(clipEdited({ duration: 10 }), false);
-  assert.equal(clipEdited({ duration: 10, contrast: 1 }), false);
+  assert.equal(clipEdited({ duration: 10, contrast: 1, saturation: 1 }), false);
   assert.equal(clipEdited({ duration: 10, contrast: 1.3 }), true);
+  assert.equal(clipEdited({ duration: 10, saturation: 1.4 }), true);
+  assert.equal(clipEdited({ duration: 10, saturation: 1 }), false);
   assert.equal(clipEdited({ duration: 10, trimStart: 1 }), true);
   assert.equal(clipEdited({ duration: 10, trimEnd: 9 }), true);   // end trimmed in
   assert.equal(clipEdited({ duration: 10, trimEnd: 10 }), false); // end at full length
 });
 
-test('buildSegmentArgs applies contrast and trim on the re-encode path', () => {
-  const clip = { path: '/a.mp4', hasAudio: true, duration: 10, contrast: 1.5, trimStart: 2, trimEnd: 8 };
+test('buildSegmentArgs applies contrast, saturation and trim on the re-encode path', () => {
+  const clip = { path: '/a.mp4', hasAudio: true, duration: 10, contrast: 1.5, saturation: 1.2, trimStart: 2, trimEnd: 8 };
   const args = buildSegmentArgs(clip, { W: 1920, H: 1080, F: 30 }, { codec: 'h264', useNvenc: false, quality: 'near' }, '/seg.ts', false);
   const s = args.join(' ');
-  assert.ok(s.includes('-ss 2'));                    // seek to the in-point
-  assert.ok(args.indexOf('-ss') < args.indexOf('-i')); // fast input seek (before -i)
-  assert.ok(s.includes('eq=contrast=1.5'));          // contrast filter in the chain
-  assert.ok(s.includes('-t 6'));                     // capped to the 6s kept span
+  assert.ok(s.includes('-ss 2'));                          // seek to the in-point
+  assert.ok(args.indexOf('-ss') < args.indexOf('-i'));     // fast input seek (before -i)
+  assert.ok(s.includes('eq=contrast=1.5:saturation=1.2')); // one eq carries both adjustments
+  assert.ok(s.includes('-t 6'));                           // capped to the 6s kept span
+
+  // saturation alone -> eq with only that param
+  const satOnly = buildSegmentArgs({ path: '/a.mp4', hasAudio: true, duration: 5, saturation: 0.5 },
+    { W: 1920, H: 1080, F: 30 }, { codec: 'h264', useNvenc: false, quality: 'near' }, '/seg.ts', false).join(' ');
+  assert.ok(satOnly.includes('eq=saturation=0.5'));
+  assert.ok(!satOnly.includes('contrast='));
 });
 
-test('buildSegmentArgs adds no trim/contrast args for an unedited clip', () => {
+test('buildSegmentArgs adds no trim/colour args for an unedited clip', () => {
   const clip = { path: '/a.mp4', hasAudio: true, duration: 10 };
   const s = buildSegmentArgs(clip, { W: 1920, H: 1080, F: 30 }, { codec: 'h264', useNvenc: false, quality: 'near' }, '/seg.ts', false).join(' ');
   assert.ok(!s.includes('-ss'));
-  assert.ok(!s.includes('eq=contrast'));
+  assert.ok(!s.includes('eq='));
   assert.ok(!s.includes('-t '));
 });
 

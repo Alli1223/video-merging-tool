@@ -81,6 +81,11 @@
               title="Increase or decrease this clip's contrast (1.00 = unchanged). Adjusted clips are re-encoded." />
           </div>
           <div class="edit-row">
+            <label for="saturationSlider">Saturation <span id="saturationVal" class="edit-val">1.00</span></label>
+            <input type="range" id="saturationSlider" min="0.5" max="2" step="0.05" value="1"
+              title="Increase or decrease this clip's colour saturation (1.00 = unchanged, lower = more muted). Adjusted clips are re-encoded." />
+          </div>
+          <div class="edit-row">
             <label for="trimStartSlider">Trim start <span id="trimStartVal" class="edit-val">0:00</span></label>
             <input type="range" id="trimStartSlider" min="0" max="100" step="0.1" value="0"
               title="Drag to skip the beginning of this clip. The preview jumps to the new start." />

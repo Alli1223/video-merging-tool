@@ -127,21 +127,22 @@ export function effectiveDuration(clip: { duration: number; trimStart?: number; 
   return Math.max(0, end - start);
 }
 
-// Does the clip carry any edit (contrast change or trim)? An edited clip can't
-// be stream-copied — its pixels change or it must be cut frame-accurately — so
-// it is always re-encoded, even when its format otherwise matches the target.
-export function clipEdited(clip: { duration?: number; contrast?: number; trimStart?: number; trimEnd?: number }): boolean {
+// Does the clip carry any edit (contrast/saturation change or trim)? An edited
+// clip can't be stream-copied — its pixels change or it must be cut frame-
+// accurately — so it is always re-encoded, even when its format matches target.
+export function clipEdited(clip: { duration?: number; contrast?: number; saturation?: number; trimStart?: number; trimEnd?: number }): boolean {
   const contrastChanged = clip.contrast != null && Math.abs(clip.contrast - 1) > 1e-3;
+  const saturationChanged = clip.saturation != null && Math.abs(clip.saturation - 1) > 1e-3;
   const startTrimmed = num(clip.trimStart, 0) > 0.01;
   const endTrimmed = clip.trimEnd != null && clip.duration != null && clip.trimEnd < clip.duration - 0.01;
-  return contrastChanged || startTrimmed || endTrimmed;
+  return contrastChanged || saturationChanged || startTrimmed || endTrimmed;
 }
 
 // Args to turn ONE clip into a target-spec segment file. When copyVideo is true
 // (the clip already matches the target and has no edits) the video is stream-
 // copied (lossless) and only the audio is normalized; otherwise the video is
 // scaled (downscaling anything larger than the target) / padded / fps-converted,
-// contrast-adjusted if requested, and re-encoded. A trim (-ss/-t) keeps only the
+// contrast/saturation-adjusted if requested, and re-encoded. A trim (-ss/-t) keeps only the
 // [trimStart, trimEnd] span — applied to copy and re-encode alike (re-encoding
 // makes the start frame-accurate). Audio is always normalized to AAC 48k stereo.
 //
@@ -156,7 +157,7 @@ export function clipEdited(clip: { duration?: number; contrast?: number; trimSta
 // which emits different parameter sets than the source encoder). The mpegts
 // muxer applies the mp4->Annex-B bitstream conversion automatically for copy.
 export function buildSegmentArgs(
-  clip: { path: string; hasAudio: boolean; duration: number; contrast?: number; trimStart?: number; trimEnd?: number },
+  clip: { path: string; hasAudio: boolean; duration: number; contrast?: number; saturation?: number; trimStart?: number; trimEnd?: number },
   target: Target,
   encOpts: EncodeOpts,
   outPath: string,
@@ -187,8 +188,13 @@ export function buildSegmentArgs(
       'setsar=1',
       `fps=${F}`
     ];
+    // One eq filter carries whichever colour adjustments differ from default.
+    const eqParts: string[] = [];
     const contrast = num(clip.contrast, 1);
-    if (Math.abs(contrast - 1) > 1e-3) vf.push(`eq=contrast=${fmtNum(clamp(contrast, 0, 3))}`);
+    if (Math.abs(contrast - 1) > 1e-3) eqParts.push(`contrast=${fmtNum(clamp(contrast, 0, 3))}`);
+    const saturation = num(clip.saturation, 1);
+    if (Math.abs(saturation - 1) > 1e-3) eqParts.push(`saturation=${fmtNum(clamp(saturation, 0, 3))}`);
+    if (eqParts.length) vf.push(`eq=${eqParts.join(':')}`);
     vf.push('format=yuv420p');
     args.push('-vf', vf.join(','));
     args.push(...buildVideoEncodeArgs(encOpts.codec, encOpts.useNvenc, encOpts.quality));
@@ -200,77 +206,11 @@ export function buildSegmentArgs(
   return args;
 }
 
-// Re-encode fallback: normalize every clip to the target spec with the concat
-// filter, in one pass. Used when the per-segment join can't be stream-copied.
-// Clips without audio get a matched silent track so the filter sees uniform
-// streams. The (potentially huge) graph is written to filterScriptPath.
-export function buildReencodeArgs(
-  clips: { path: string; width: number; height: number; fps: number; hasAudio: boolean; duration: number }[],
-  outputPath: string,
-  filterScriptPath: string,
-  target?: Target,
-  encOpts: EncodeOpts = { codec: 'h264', useNvenc: false, quality: 'near' }
-): { args: string[]; filterComplex: string } {
-  const { W, H, F } = (target && target.W) ? target : reencodeTarget(clips);
-  const anyAudio = clips.some((c) => c.hasAudio);
-
-  const inputArgs: string[] = [];
-  let inputIndex = 0;
-  const videoInputIdx: number[] = [];
-  const audioInputIdx: number[] = [];
-
-  clips.forEach((c) => {
-    inputArgs.push('-i', c.path);
-    videoInputIdx.push(inputIndex++);
-  });
-
-  if (anyAudio) {
-    clips.forEach((c, i) => {
-      if (c.hasAudio) {
-        audioInputIdx[i] = videoInputIdx[i];
-      } else {
-        const dur = c.duration > 0 ? c.duration : 1;
-        inputArgs.push('-f', 'lavfi', '-t', String(dur), '-i', 'anullsrc=r=48000:cl=stereo');
-        audioInputIdx[i] = inputIndex++;
-      }
-    });
-  }
-
-  const filters: string[] = [];
-  const concatLabels: string[] = [];
-  clips.forEach((c, i) => {
-    filters.push(
-      `[${videoInputIdx[i]}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,` +
-      `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${F},format=yuv420p[v${i}]`
-    );
-    if (anyAudio) {
-      filters.push(`[${audioInputIdx[i]}:a]aresample=48000,aformat=channel_layouts=stereo[a${i}]`);
-      concatLabels.push(`[v${i}][a${i}]`);
-    } else {
-      concatLabels.push(`[v${i}]`);
-    }
-  });
-
-  const n = clips.length;
-  const concatFilter = anyAudio
-    ? `${concatLabels.join('')}concat=n=${n}:v=1:a=1[v][a]`
-    : `${concatLabels.join('')}concat=n=${n}:v=1:a=0[v]`;
-  const filterComplex = filters.join(';') + ';' + concatFilter;
-
-  // The filter graph can be huge (one chain per clip). Pass it via a script
-  // file (-filter_complex_script) rather than inline, so the command line stays
-  // short — otherwise many clips overflow the OS command-line limit, which
-  // surfaces as "spawn ENAMETOOLONG". The caller writes filterComplex to
-  // filterScriptPath.
-  const args = [...inputArgs, '-filter_complex_script', filterScriptPath, '-map', '[v]'];
-  if (anyAudio) args.push('-map', '[a]');
-  args.push(...buildVideoEncodeArgs(encOpts.codec, encOpts.useNvenc, encOpts.quality));
-  if (anyAudio) args.push('-c:a', 'aac', '-b:a', '320k');
-  else args.push('-an');
-  if (isMp4Like(outputPath)) args.push('-movflags', '+faststart');
-  args.push(outputPath);
-  return { args, filterComplex };
-}
+// NOTE: a full re-encode is done CLIP-BY-CLIP in ffmpeg.ts (mergeReencode) —
+// each clip re-encoded to its own MPEG-TS segment, then stream-copy joined — so
+// memory stays flat regardless of clip count. An earlier single concat-filter
+// pass (buildReencodeArgs) that opened every input at once was removed: on a
+// large merge it could use 100+ GB of RAM.
 
 // ---------------------------------------------------------------------------
 // Background music

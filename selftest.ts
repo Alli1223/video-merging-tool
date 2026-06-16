@@ -254,7 +254,7 @@ function contentDecodeErrors(f: string): number {
   // P is untouched (stream-copied); Q has its contrast boosted and is trimmed to
   // its middle 1s, so it is re-encoded. The merged file must be the trimmed total
   // length (2s + 1s) and decode cleanly.
-  console.log('\n--- Per-clip edits: contrast + trim one of two clips ---');
+  console.log('\n--- Per-clip edits: contrast + saturation + trim one of two clips ---');
   const teDir = path.join(dir, 'edit-test');
   fs.mkdirSync(teDir);
   gen(teDir, 'P.mp4', ['-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30:duration=2',
@@ -265,7 +265,7 @@ function contentDecodeErrors(f: string): number {
     '-c:a', 'aac', '-shortest', '-metadata', 'creation_time=2021-03-01T10:00:00.000000Z']);
   const { clips: teClips } = await scanDirectory(teDir);
   const q = teClips.find((c) => c.name === 'Q.mp4');
-  if (q) { q.contrast = 1.5; q.trimStart = 0.5; q.trimEnd = 1.5; } // keep its middle second
+  if (q) { q.contrast = 1.5; q.saturation = 1.3; q.trimStart = 0.5; q.trimEnd = 1.5; } // keep its middle second
   const outTe = path.join(teDir, 'merged_edit.mp4');
   const r8 = await ffmpeg.merge({ outputPath: outTe, clips: teClips,
     settings: { codec: 'h264', quality: 'near' } }, onProg());
@@ -278,6 +278,65 @@ function contentDecodeErrors(f: string): number {
   console.log('  decodes clean       :', teErrs === 0 ? 'PASS' : `FAIL (${teErrs} content error(s))`);
   console.log('  re-encoded edited   :', r8.mode === 'hybrid' ? 'PASS' : `FAIL (${r8.mode})`);
   console.log('  verified            :', r8.verified ? 'PASS' : 'FAIL');
+
+  // --- Bounded full re-encode (the mergeReencode fallback) ---
+  // mergeReencode re-encodes EVERY clip to its own MPEG-TS segment one at a time
+  // (flat memory), then joins them — the fallback that replaced a single concat-
+  // filter pass which opened every input at once and could use 100+ GB of RAM.
+  // It's only hit when a stream-copy join fails, so exercise it directly and
+  // confirm it yields a clean, full-length, correctly-scaled output.
+  console.log('\n--- Bounded full re-encode (mergeReencode fallback) ---');
+  const reDir = path.join(dir, 'reencode-test');
+  fs.mkdirSync(reDir);
+  gen(reDir, 'R1.mp4', ['-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30:duration=2',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-shortest', '-metadata', 'creation_time=2021-04-01T09:00:00.000000Z']);
+  gen(reDir, 'R2.mp4', ['-f', 'lavfi', '-i', 'testsrc=size=640x480:rate=25:duration=2', // different size/fps
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-metadata', 'creation_time=2021-04-01T10:00:00.000000Z']);
+  const { clips: reClips } = await scanDirectory(reDir);
+  const outRe2 = path.join(reDir, 'reencoded.mp4');
+  const reTotal = reClips.reduce((s, c) => s + (c.duration || 0), 0);
+  const r9 = await ffmpeg.mergeReencode(reClips, outRe2, { W: 1280, H: 720, F: 30 },
+    { codec: 'h264', useNvenc: false, quality: 'near' }, reTotal, onProg());
+  console.log('\n  result:', JSON.stringify(r9));
+  probe(outRe2);
+  const reRes = videoRes(outRe2);
+  const reErrs = contentDecodeErrors(outRe2);
+  const reDur2 = durationOf(outRe2);
+  console.log('  output exists       :', fs.existsSync(outRe2) ? 'PASS' : 'FAIL');
+  console.log('  all scaled to 720p  :', reRes === '1280x720' ? 'PASS' : `FAIL (${reRes})`);
+  console.log('  decodes clean       :', reErrs === 0 ? 'PASS' : `FAIL (${reErrs} content error(s))`);
+  console.log('  full length ~4s     :', (reDur2 > 3 && reDur2 < 5) ? 'PASS' : `FAIL (${reDur2.toFixed(2)}s)`);
+
+  // --- Drop an unprocessable clip instead of failing the whole merge ---
+  // A clip that can't be turned into a segment (here a garbage file masquerading
+  // as video) is cut out and the merge finishes with the rest. The output must
+  // be just the good clip's length and still verify (the shorter length must NOT
+  // be mistaken for truncation now that verification uses the produced duration).
+  console.log('\n--- Drop a broken clip, finish with the rest ---');
+  const dropDir = path.join(dir, 'drop-test');
+  fs.mkdirSync(dropDir);
+  gen(dropDir, 'good.mp4', ['-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30:duration=2',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-shortest', '-metadata', 'creation_time=2021-05-01T09:00:00.000000Z']);
+  fs.writeFileSync(path.join(dropDir, 'bad.mp4'), Buffer.from('this is not a real video file '.repeat(200)));
+  const { clips: goodClips } = await scanDirectory(dropDir); // only good.mp4 has a video stream
+  const goodClip = goodClips[0];
+  // Fabricate a merge entry for the garbage file (a different size forces the
+  // per-clip hybrid path, where it will fail to encode and be dropped).
+  const badClip = { ...goodClip, path: path.join(dropDir, 'bad.mp4'), name: 'bad.mp4', width: 640, height: 480, compatKey: 'bad' };
+  const outDrop = path.join(dropDir, 'merged_drop.mp4');
+  const r10 = await ffmpeg.merge({ outputPath: outDrop, clips: [goodClip, badClip],
+    settings: { codec: 'h264', quality: 'near' } }, onProg());
+  console.log('\n  result:', JSON.stringify(r10));
+  const dropKept = fs.existsSync(outDrop);
+  const dropDur = dropKept ? durationOf(outDrop) : 0;
+  const dropErrs = dropKept ? contentDecodeErrors(outDrop) : 999;
+  console.log('  output exists       :', dropKept ? 'PASS' : 'FAIL');
+  console.log('  bad clip dropped    :', (r10.dropped || []).some((d) => d.name === 'bad.mp4') ? 'PASS' : `FAIL (${JSON.stringify(r10.dropped || [])})`);
+  console.log('  kept good clip ~2s  :', (dropDur > 1.6 && dropDur < 2.6) ? 'PASS' : `FAIL (${dropDur.toFixed(2)}s)`);
+  console.log('  decodes clean       :', dropErrs === 0 ? 'PASS' : `FAIL (${dropErrs} content error(s))`);
+  console.log('  still verified      :', r10.verified ? 'PASS' : 'FAIL');
 
   fs.rmSync(dir, { recursive: true, force: true });
   console.log('\nAll engine tests completed. Cleaned up temp dir.');
