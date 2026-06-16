@@ -1,6 +1,6 @@
 {
   "name": "video-merging-tool",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Scan a folder of videos, order them by capture time, reorder on a drag-and-drop timeline, and merge them into one file. Lossless stream-copy when clips are compatible, automatic re-encode fallback otherwise.",
   "main": "out/main.js",
   "scripts": {
