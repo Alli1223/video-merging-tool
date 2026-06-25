@@ -46,6 +46,9 @@ test('buildCopyArgs stream-copies and adds faststart for mp4 only', () => {
   const mp4 = buildCopyArgs('/tmp/list.txt', '/out/movie.mp4');
   assert.deepEqual(mp4.slice(0, 8), ['-f', 'concat', '-safe', '0', '-i', '/tmp/list.txt', '-c', 'copy']);
   assert.ok(mp4.includes('-map') && mp4.includes('0'));
+  // Unmappable source streams (e.g. GoPro "Unknown: none" tracks) must be
+  // ignored rather than aborting the merge.
+  assert.ok(mp4.includes('-ignore_unknown'));
   assert.ok(mp4.join(' ').includes('-movflags +faststart'));
   assert.equal(mp4[mp4.length - 1], '/out/movie.mp4');
 

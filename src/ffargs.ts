@@ -40,8 +40,15 @@ export function isMp4Like(outputPath: string): boolean {
 }
 
 // Lossless path: stream-copy with the concat demuxer.
+//
+// `-map 0` keeps every stream (so audio and data tracks survive), but some
+// sources carry streams ffmpeg can't map into the output — e.g. GoPro files
+// have "Unknown: none" tracks alongside the video/audio/gpmd-telemetry streams.
+// Without `-ignore_unknown`, mapping one of those aborts the whole merge with
+// "Cannot map stream - unsupported type" (exit -22 / EINVAL). The flag drops
+// only the unmappable streams and copies the rest.
 export function buildCopyArgs(listFile: string, outputPath: string): string[] {
-  const args = ['-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', '-map', '0'];
+  const args = ['-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', '-map', '0', '-ignore_unknown'];
   if (isMp4Like(outputPath)) args.push('-movflags', '+faststart');
   args.push(outputPath);
   return args;
